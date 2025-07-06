@@ -8,9 +8,13 @@ This bot monitors specified Discord channels and periodically generates summarie
 - Manual summary generation via command.
 - Customizable list of channels to monitor.
 - Identification of key topics, active users, and recent messages in summaries.
-- Fallback to simple keyword-based summary if Gemini API fails.
+- Fallback to simple keyword-based summary if Gemini API (currently `gemini-1.5-flash`) fails or is not configured.
 - Commands to manage monitored channels and bot settings.
 - Advanced, more detailed summaries using an asynchronous Gemini API call.
+- Environment variable support for most configurations (e.g., API keys, channel IDs, summary interval).
+- Regular cleanup of old message data and garbage collection for better memory management.
+- Logic to determine if a summary is needed based on message count, unique authors, and content length.
+- API usage tracking and system resource monitoring commands for administrators.
 
 ## Setup and Configuration
 
@@ -20,7 +24,7 @@ To get the bot running, you need to configure a few things.
 
 - Python 3.7+ (Recommended: Python 3.11.x as specified in `runtime.txt`)
 - A Discord Bot Token
-- A Gemini API Key
+- A Google API Key (for Gemini)
 
 ### Installation
 
@@ -36,7 +40,7 @@ To get the bot running, you need to configure a few things.
     ```bash
     pip install -r requirements.txt
     ```
-    This will install `discord.py`, `google-generativeai`, and `python-dotenv`.
+    This will install `discord.py`, `google.genai` (the new Google Gen AI SDK), `python-dotenv`, and `psutil`.
 
 ### Configuration
 
@@ -79,27 +83,29 @@ You need to set the following credentials and IDs. You can either set them as en
    This key is required to use Google's Gemini API for generating summaries.
    - **Environment Variable (Recommended):** Add to your `.env` file:
      ```
-     GEMINI_API_KEY='YOUR_GEMINI_API_KEY_HERE'
+     GOOGLE_API_KEY='YOUR_GOOGLE_API_KEY_HERE'
      ```
      Then, in `bot.py`, ensure it's loaded:
      ```python
      # Near the top of bot.py:
-     # GEMINI_API_KEY = os.getenv(‘GEMINI_API_KEY’) # This line should already be there or similar
-     GEMINI_API_KEY = os.getenv('GEMINI_API_KEY') # Ensure it uses os.getenv
-     if GEMINI_API_KEY:
-         genai.configure(api_key=GEMINI_API_KEY)
-         model = genai.GenerativeModel('gemini-pro')
+     GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY') # Ensure it uses os.getenv
+     if GOOGLE_API_KEY:
+         genai.configure(api_key=GOOGLE_API_KEY) # Updated SDK usage
+         # Note: Model selection is now typically done when calling the generation method
+         # client = genai.Client(api_key=GOOGLE_API_KEY) # client initialization
+         # model = client.models.get('gemini-1.5-flash') # or similar, depending on SDK version
      else:
-         print("Warning: GEMINI_API_KEY not found. AI summaries will be disabled. Using simple summary fallback.")
-         model = None # Or handle appropriately
+         print("Warning: GOOGLE_API_KEY not found. AI summaries will be disabled. Using simple summary fallback.")
+         # model = None # Or handle appropriately
      ```
    - **Directly in `bot.py` (Less Secure):**
      ```python
-     GEMINI_API_KEY = 'YOUR_GEMINI_API_KEY_HERE' # Replace with your actual key
-     genai.configure(api_key=GEMINI_API_KEY)
-     model = genai.GenerativeModel('gemini-pro')
+     GOOGLE_API_KEY = 'YOUR_GOOGLE_API_KEY_HERE' # Replace with your actual key
+     genai.configure(api_key=GOOGLE_API_KEY)
+     # client = genai.Client(api_key=GOOGLE_API_KEY)
+     # model = client.models.get('gemini-1.5-flash')
      ```
-   *How to get a key:* Visit [Google AI Studio](https://aistudio.google.com/app/apikey) to create and obtain your API key.
+   *How to get a key:* Visit [Google AI Studio](https://aistudio.google.com/app/apikey) to create and obtain your API key. The bot currently uses the `gemini-1.5-flash` model.
 
 **3. Summary Channel ID:**
 
@@ -110,21 +116,34 @@ You need to set the following credentials and IDs. You can either set them as en
      ```
      You can also use the `!set_summary_channel <#channel_mention>` command once the bot is running (requires administrator permissions).
    *How to get a Channel ID:* In Discord, enable Developer Mode (User Settings -> App Settings -> Advanced). Then, right-click on the desired channel and select "Copy ID".
+   This setting can also be configured via the `SUMMARY_CHANNEL_ID` environment variable (e.g., `SUMMARY_CHANNEL_ID='YOUR_SUMMARY_CHANNEL_ID'`).
 
 **4. Monitoring Channel IDs:**
 
    These are the IDs of the Discord channels that the bot will monitor for messages to summarize.
-   - **In `bot.py` (Default):**
-     ```python
-     MONITORING_CHANNELS = [987654321, 876543210]  # Replace with your desired channel IDs, e.g., [112233445566778899, 998877665544332211]
+   - **Environment Variable (Recommended):** Set `MONITORING_CHANNELS` as a comma-separated string of channel IDs in your `.env` file or environment variables:
      ```
-   You can add or remove channel IDs from this list directly in the code, or use the bot commands `!add_monitor <#channel_mention>` and `!remove_monitor <#channel_mention>` (require administrator permissions).
+     MONITORING_CHANNELS='YOUR_CHANNEL_ID_1,YOUR_CHANNEL_ID_2'
+     ```
+     If this environment variable is not set, the bot will default to an empty list, and you will need to add channels using bot commands.
+   - **In `bot.py` (Fallback if environment variable is not set):**
+     ```python
+     MONITORING_CHANNELS = [] # Default is empty, e.g., [112233445566778899, 998877665544332211]
+     ```
+   You can use the bot commands `!add_monitor <#channel_mention>` and `!remove_monitor <#channel_mention>` (require administrator permissions) to manage this list dynamically.
 
-**5. Other Settings (Optional in `bot.py`):**
+**5. Other Settings (Configurable via Environment Variables or in `bot.py`):**
 
-   You can also adjust these settings near the top of `bot.py`:
-   - `SUMMARY_INTERVAL = 60`: How often (in minutes) summaries are automatically generated.
-   - `MAX_MESSAGES_PER_SUMMARY = 50`: The maximum number of recent messages to consider for each summary.
+   These settings can be adjusted either directly in `bot.py` or preferably through environment variables. Environment variables will override values set in `bot.py`.
+   - `SUMMARY_INTERVAL`: How often (in minutes) summaries are automatically generated. Default: `60`.
+     - Environment Variable: `SUMMARY_INTERVAL='30'`
+     - In `bot.py`: `SUMMARY_INTERVAL = int(os.getenv('SUMMARY_INTERVAL', 60))`
+   - `MAX_MESSAGES_PER_SUMMARY`: The maximum number of recent messages to consider for each summary. Default: `50`.
+     - Environment Variable: `MAX_MESSAGES_PER_SUMMARY='100'`
+     - In `bot.py`: `MAX_MESSAGES_PER_SUMMARY = int(os.getenv('MAX_MESSAGES_PER_SUMMARY', 50))`
+   - `MAX_BUFFER_SIZE`: The maximum number of messages to keep in the buffer for each channel before older messages are discarded. Default: `100`.
+     - Environment Variable: `MAX_BUFFER_SIZE='200'`
+     - In `bot.py`: `MAX_BUFFER_SIZE = int(os.getenv('MAX_BUFFER_SIZE', 100))`
 
 ### Running the Bot
 
@@ -135,7 +154,7 @@ You need to set the following credentials and IDs. You can either set them as en
     python bot.py
     ```
 
-If you are deploying to a platform like Railway, the `Procfile` (`worker: python bot.py`) and `runtime.txt` will be used. Ensure your environment variables (`DISCORD_BOT_TOKEN`, `GEMINI_API_KEY`) are set in Railway's service settings.
+If you are deploying to a platform like Railway, the `Procfile` (`worker: python bot.py`) and `runtime.txt` will be used. Ensure your environment variables (`DISCORD_BOT_TOKEN`, `GOOGLE_API_KEY`, and other optional settings like `SUMMARY_CHANNEL_ID`, `MONITORING_CHANNELS`, etc.) are set in Railway's service settings.
 
 ## Commands
 
@@ -144,22 +163,26 @@ All commands are prefixed with `!`.
 -   `!summary [channel]` - Generates a summary for the specified channel (e.g., `!summary #general`) or the current channel if none is provided. The channel must be in the monitoring list.
 -   `!advanced_summary [channel]` - Generates a more detailed and structured summary for the specified or current channel. This uses a more comprehensive prompt for the Gemini API.
 -   `!recent [limit]` - Shows the most recent messages (default 10, max usually around 25 due to Discord embed limits) in the current monitored channel. Example: `!recent 5`.
--   `!status` - Displays the bot's current operational status, including the summary channel, all monitored channels (with buffered message counts), summary interval, and AI model status.
+-   `!status` - Displays the bot's current operational status, including the summary channel, all monitored channels (with buffered message counts), summary interval, AI model status, and uptime.
 -   `!set_summary_channel <#channel_mention>` - (Administrator only) Sets the channel where the bot will post automatic summaries. Example: `!set_summary_channel #bot-summaries`.
 -   `!add_monitor <#channel_mention>` - (Administrator only) Adds a channel to the list of channels the bot monitors. Example: `!add_monitor #important-updates`.
 -   `!remove_monitor <#channel_mention>` - (Administrator only) Removes a channel from the monitoring list. Example: `!remove_monitor #old-channel`.
+-   `!api_usage` - (Administrator only) Displays the current usage of the Gemini API for the day, including the number of calls made, the percentage used, and the remaining calls. It also provides a prediction for the total daily usage.
+-   `!system` - (Administrator only) Shows the system resource usage of the server where the bot is running, including CPU usage, memory usage (total and bot-specific), Python version, and bot uptime.
 
 ## How it Works
 
 1.  The bot listens to messages in channels listed in `MONITORING_CHANNELS`.
 2.  Messages are stored in a temporary buffer (`message_buffer`).
 3.  Periodically (defined by `SUMMARY_INTERVAL`) or when `!summary`/`!advanced_summary` is called:
-    a.  The collected messages are sent to the Gemini API (if configured and available).
-    b.  Gemini API processes the conversation and returns a summary based on the provided prompt.
-    c.  If the Gemini API fails or is not configured, a simple keyword-based summary is generated as a fallback.
-    d.  The summary is posted as an embed in the `SUMMARY_CHANNEL_ID`.
-4.  The `MessageData` class structures message information, including author, content, timestamp, attachments, and embeds, to provide richer context for summaries.
-5.  Various commands allow users to interact with the bot for on-demand summaries, status checks, and configuration changes.
+    a.  The bot first checks if a summary is needed based on factors like message count and diversity of authors using the `needs_summary` logic.
+    b.  If a summary is needed, the collected messages are sent to the Gemini API (model `gemini-1.5-flash`, using the `google.genai` SDK) if configured and available.
+    c.  The Gemini API processes the conversation and returns a summary. The `!advanced_summary` command uses a more detailed prompt and an asynchronous API call for a more comprehensive result.
+    d.  If the Gemini API fails or is not configured, a simple keyword-based summary is generated as a fallback.
+    e.  The summary is posted as an embed in the `SUMMARY_CHANNEL_ID`.
+4.  The `MessageData` class structures message information, including author, content, timestamp, jump URL, channel name, and counts of attachments/embeds, to provide richer context for summaries.
+5.  Various commands allow users to interact with the bot for on-demand summaries, status checks, configuration changes, API usage viewing, and system resource monitoring.
+6.  A background task (`cleanup_task`) runs periodically (e.g., every 6 hours) to clear out message buffers for channels no longer being monitored and to trigger Python's garbage collector, helping to manage memory usage.
 
 ## Deployment (Example: Railway)
 
@@ -169,8 +192,8 @@ All commands are prefixed with `!`.
 4.  In Railway:
     a.  Create a new project and deploy from your GitHub repository.
     b.  Go to your service settings -> Variables.
-    c.  Add your `DISCORD_BOT_TOKEN` and `GEMINI_API_KEY` as environment variables.
-    d.  If you've modified `bot.py` to take `SUMMARY_CHANNEL_ID` or `MONITORING_CHANNELS` from environment variables, add those too.
+    c.  Add your `DISCORD_BOT_TOKEN` and `GOOGLE_API_KEY` as environment variables.
+    d.  If you intend to use environment variables for other settings like `SUMMARY_CHANNEL_ID`, `MONITORING_CHANNELS`, `SUMMARY_INTERVAL`, `MAX_MESSAGES_PER_SUMMARY`, or `MAX_BUFFER_SIZE`, add those here as well.
 5.  Railway will use the `Procfile` to start the bot.
 
 ## `.gitignore`
