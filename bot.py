@@ -122,7 +122,7 @@ def summarize_messages(messages):
         response = client.models.generate_content(
             model='gemini-1.5-flash',
             contents=prompt,
-            config=types.GenerateContentConfig(
+            generation_config=types.GenerateContentConfig( # 'config' を 'generation_config' に変更
                 temperature=0.3,
                 max_output_tokens=1000,
             ),
@@ -183,16 +183,13 @@ async def async_summarize_messages(messages):
 Markdown形式で構造化して出力してください。"""
         
         # 非同期でAPIを呼び出し
-        response = await asyncio.get_event_loop().run_in_executor(
-            None, 
-            lambda: client.models.generate_content(
-                model='gemini-1.5-flash',
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.3,
-                    max_output_tokens=1500,
-                ),
-            )
+        response = await client.aio.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=prompt,
+            generation_config=types.GenerateContentConfig( # 'config' を 'generation_config' に変更 (SDKのドキュメントに合わせる)
+                temperature=0.3,
+                max_output_tokens=1500,
+            ),
         )
         
         daily_api_calls += 1
