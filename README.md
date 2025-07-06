@@ -137,6 +137,35 @@ You need to set the following credentials and IDs. You can either set them as en
 
 If you are deploying to a platform like Railway, the `Procfile` (`worker: python bot.py`) and `runtime.txt` will be used. Ensure your environment variables (`DISCORD_BOT_TOKEN`, `GEMINI_API_KEY`) are set in Railway's service settings.
 
+## Advanced Optimizations
+
+The bot incorporates several optimizations for efficiency, stability, and better API resource management:
+
+### 1. Environment Variables for Configuration
+
+-   **Security and Flexibility:** API keys (`GEMINI_API_KEY`) and the bot token (`DISCORD_BOT_TOKEN`) are loaded from a `.env` file. This practice is more secure than hardcoding credentials and allows for easier configuration across different environments (development, production).
+-   **Setup:** Create a `.env` file in the root directory of the bot:
+    ```env
+    GEMINI_API_KEY='your_gemini_api_key_here'
+    DISCORD_BOT_TOKEN='your_discord_bot_token_here'
+    ```
+    The bot uses the `python-dotenv` library to load these variables automatically.
+
+### 2. API Rate Limiting
+
+-   **Preventing Abuse:** To avoid exceeding API rate limits (especially for the Gemini API), a rate limiter is implemented.
+-   **Mechanism:** A decorator (`@rate_limit`) controls how frequently the summarization functions can make external API calls. By default, it's set to 60 calls per minute per function.
+-   **Behavior:** If the call frequency exceeds the limit, the bot will pause execution briefly before proceeding, ensuring compliance with API usage policies. This applies to both `summarize_messages` and `async_summarize_messages`.
+
+### 3. Caching for Summaries
+
+-   **Efficiency and Speed:** Summarization results are cached using an LRU (Least Recently Used) cache strategy via `functools.lru_cache`.
+-   **Mechanism:**
+    -   When a summary is requested for a set of messages, a unique hash is generated based on the message content (author, text, timestamp, attachments, embeds).
+    -   If a summary for this hash already exists in the cache, it's returned instantly without calling the Gemini API.
+    -   If not, the Gemini API is called, and its response is stored in the cache against the hash for future requests.
+-   **Benefits:** This significantly reduces redundant API calls for identical message sets, saves API costs, and speeds up responses for previously summarized content. The cache has a default maximum size of 100 entries.
+
 ## Commands
 
 All commands are prefixed with `!`.
