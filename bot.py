@@ -5,6 +5,12 @@ import asyncio
 from collections import defaultdict
 import google.generativeai as genai  # Gemini API
 import os  # 環境変数用
+from dotenv import load_dotenv  # .envファイル用
+import time  # rate_limit用
+from functools import wraps, lru_cache  # rate_limit用とcache用
+import hashlib # cache用
+
+load_dotenv()  # .envファイルから環境変数を読み込む
 
 # Botの設定
 
@@ -19,11 +25,14 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # 環境変数から読み込む場合:
 
-# GEMINI_API_KEY = os.getenv(‘GEMINI_API_KEY’)
-
-GEMINI_API_KEY = 'YOUR_GEMINI_API_KEY_HERE'
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-pro')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+# GEMINI_API_KEY = 'YOUR_GEMINI_API_KEY_HERE' # Hardcoded key removed
+if not GEMINI_API_KEY:
+    print("エラー: GEMINI_API_KEY が設定されていません。")
+    # 必要に応じてここでプログラムを終了するか、デフォルトの動作を設定します。
+else:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel('gemini-pro')
 
 # 設定項目
 
@@ -45,6 +54,36 @@ class MessageData:
         self.channel_name = message.channel.name
         self.attachments = len(message.attachments)
         self.embeds = len(message.embeds)
+
+# レート制限デコレーター
+def rate_limit(calls_per_minute=60):
+    def decorator(func):
+        last_called = []
+
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            now = time.time()
+            # 古いタイムスタンプをフィルタリング
+            last_called[:] = [t for t in last_called if now - t < 60]
+
+            if len(last_called) >= calls_per_minute:
+                # 最初の呼び出しからの経過時間に基づいてスリープ時間を計算
+                sleep_time = 60 - (now - last_called[0])
+                if sleep_time > 0: # Ensure sleep_time is positive
+                    print(f"Rate limit reached. Sleeping for {sleep_time:.2f} seconds.")
+                    await asyncio.sleep(sleep_time) # Use asyncio.sleep for async functions
+
+            last_called.append(time.time()) # Record current call time
+            # Correctly call sync or async function
+            if asyncio.iscoroutinefunction(func):
+                return await func(*args, **kwargs)
+            else:
+                # For synchronous functions, run in executor to avoid blocking asyncio loop
+                loop = asyncio.get_event_loop()
+                return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
+
+        return wrapper
+    return decorator
 
 def create_summary_embed(messages, channel_name):
     """要約用のEmbedを作成"""
@@ -108,53 +147,132 @@ def create_summary_embed(messages, channel_name):
 
     return embed
 
-def summarize_messages(messages):
-    """メッセージを要約する関数（Gemini APIを使用）"""
-    if not messages:
+# Helper function to create a hash for caching from message objects
+def create_message_hash(messages: list[MessageData]) -> str:
+    """Creates a SHA256 hash from a list of MessageData objects for caching."""
+    hasher = hashlib.sha256()
+    # Sort messages by timestamp to ensure consistent hash for the same set of messages.
+    # Using specific attributes that define the content relevant for summary.
+    sorted_messages = sorted(messages, key=lambda m: m.timestamp)
+    for msg in sorted_messages:
+        data_to_hash = f"{msg.author}:{msg.content}:{msg.timestamp}:{msg.attachments}:{msg.embeds}"
+        hasher.update(data_to_hash.encode('utf-8'))
+    return hasher.hexdigest()
+
+# --- Synchronous Summarization with Caching ---
+@rate_limit(calls_per_minute=60) # Rate limit before caching
+@lru_cache(maxsize=100)
+def _cached_summarize_messages_api(message_content_hash: str, conversation_text: str):
+    """Internal function to call Gemini API for synchronous summarization, with caching and rate limiting."""
+    if not conversation_text:
         return "要約するメッセージがありません。"
-
     try:
-        # メッセージを整形
-        message_texts = []
-        for msg in messages:
-            # 添付ファイルやEmbedの情報も含める
-            text = f"{msg.author}: {msg.content}"
-            if msg.attachments > 0:
-                text += f" [添付ファイル: {msg.attachments}件]"
-            if msg.embeds > 0:
-                text += f" [Embed: {msg.embeds}件]"
-            message_texts.append(text)
-
-        # 会話履歴を結合
-        conversation = "\n".join(message_texts)
-
-        # Gemini APIで要約を生成
         prompt = f"""以下のDiscordの会話を分析して、簡潔な要約を作成してください：
 
 会話内容：
-{conversation}
+{conversation_text}
 
 以下の点を含めて要約してください：
-
 1. 主要なトピックや話題
 2. 重要な決定事項や合意事項
 3. 質問と回答のペア
 4. 注目すべき情報や発言
-
 要約は簡潔で分かりやすく、箇条書きを使って構造化してください。"""
-
         response = model.generate_content(prompt)
-
-        # レスポンスが空でないことを確認
         if response.text:
-            return response.text[:1024]  # Embedフィールドの文字数制限
+            return response.text[:1024]
         else:
             return "要約の生成に失敗しました。"
-
     except Exception as e:
-        print(f"Gemini API エラー: {e}")
-        # フォールバック: 簡易的な要約
-        return generate_simple_summary(messages)
+        print(f"Gemini API エラー (_cached_summarize_messages_api): {e}")
+        # This cached function cannot call generate_simple_summary directly as it lacks MessageData list
+        raise # Re-raise the exception to be handled by the caller, allowing fallback
+
+def summarize_messages(messages: list[MessageData]):
+    """メッセージを要約する関数（Gemini APIを使用）, now with caching and rate limiting."""
+    if not messages:
+        return "要約するメッセージがありません。"
+
+    message_texts = []
+    for msg in messages:
+        text = f"{msg.author}: {msg.content}"
+        if msg.attachments > 0:
+            text += f" [添付ファイル: {msg.attachments}件]"
+        if msg.embeds > 0:
+            text += f" [Embed: {msg.embeds}件]"
+        message_texts.append(text)
+    conversation_for_prompt = "\n".join(message_texts)
+
+    # Create a hash of the MessageData objects themselves for the cache key
+    data_hash = create_message_hash(messages)
+
+    try:
+        # Call the internal cached and rate-limited function
+        return _cached_summarize_messages_api(data_hash, conversation_for_prompt)
+    except Exception as e:
+        # If _cached_summarize_messages_api raises an error (e.g., API error after rate limit/cache miss)
+        print(f"Error in summarize_messages calling cached API: {e}")
+        return generate_simple_summary(messages) # Fallback to simple summary
+
+# --- Asynchronous Summarization with Caching ---
+@rate_limit(calls_per_minute=60) # Rate limit before caching
+@lru_cache(maxsize=100)
+async def _cached_async_summarize_messages_api(message_content_hash: str, conversation_text: str):
+    """Internal async function to call Gemini API, with caching and rate limiting."""
+    if not conversation_text:
+        return "要約するメッセージがありません。"
+    try:
+        prompt = f"""あなたはDiscordサーバーの会話を分析する専門家です。
+以下の会話を分析して、包括的な要約を作成してください。
+会話内容：
+{conversation_text}
+要約には以下を含めてください：
+1. **主要トピック**: 会話の中心となった話題
+2. **重要な情報**: 共有された重要な情報やリンク
+3. **決定事項**: 何か決定されたことがあれば記載
+4. **アクションアイテム**: 誰かが行うべきタスク
+5. **質問と回答**: 解決された質問と未解決の質問
+6. **全体的な雰囲気**: 会話のトーンや感情
+Markdown形式で構造化して出力してください。"""
+
+        # model.generate_content is synchronous, run in executor for async context
+        response = await asyncio.get_event_loop().run_in_executor(
+            None, model.generate_content, prompt
+        )
+        if response.text:
+            return response.text[:1024]
+        else:
+            return "要約の生成に失敗しました。"
+    except Exception as e:
+        print(f"Gemini API エラー (_cached_async_summarize_messages_api): {e}")
+        raise # Re-raise to be handled by caller
+
+async def async_summarize_messages(messages: list[MessageData]):
+    """非同期版の要約関数（より高度な処理用）, now with caching and rate limiting."""
+    if not messages:
+        return "要約するメッセージがありません。"
+
+    message_texts = []
+    for msg in messages:
+        text = f"{msg.author}: {msg.content}"
+        if msg.attachments > 0:
+            text += f" [添付ファイル: {msg.attachments}件]"
+        if msg.embeds > 0:
+            text += f" [Embed: {msg.embeds}件]"
+        message_texts.append(text)
+    conversation_for_prompt = "\n".join(message_texts)
+
+    data_hash = create_message_hash(messages)
+
+    try:
+        return await _cached_async_summarize_messages_api(data_hash, conversation_for_prompt)
+    except Exception as e:
+        print(f"Error in async_summarize_messages calling cached API: {e}")
+        return generate_simple_summary(messages) # Fallback
+
+# generate_simple_summary was here, it's fine, it's used by the new functions.
+# The duplicated old summarize_messages logic (which was a block of loose code) and
+# the duplicated async_summarize_messages function definition are removed by this search and replace.
 
 def generate_simple_summary(messages):
     """Gemini APIが使えない場合の簡易要約"""
@@ -174,56 +292,8 @@ def generate_simple_summary(messages):
 
     return "特定のトピックは見つかりませんでした。"
 
-async def async_summarize_messages(messages):
-    """非同期版の要約関数（より高度な処理用）"""
-    if not messages:
-        return "要約するメッセージがありません。"
-
-    try:
-        # メッセージを整形
-        message_texts = []
-        for msg in messages:
-            text = f"{msg.author}: {msg.content}"
-            if msg.attachments > 0:
-                text += f" [添付ファイル: {msg.attachments}件]"
-            if msg.embeds > 0:
-                text += f" [Embed: {msg.embeds}件]"
-            message_texts.append(text)
-
-        conversation = "\n".join(message_texts)
-
-        # より詳細なプロンプト
-        prompt = f"""あなたはDiscordサーバーの会話を分析する専門家です。
-
-以下の会話を分析して、包括的な要約を作成してください。
-
-会話内容：
-{conversation}
-
-要約には以下を含めてください：
-
-1. **主要トピック**: 会話の中心となった話題
-2. **重要な情報**: 共有された重要な情報やリンク
-3. **決定事項**: 何か決定されたことがあれば記載
-4. **アクションアイテム**: 誰かが行うべきタスク
-5. **質問と回答**: 解決された質問と未解決の質問
-6. **全体的な雰囲気**: 会話のトーンや感情
-
-Markdown形式で構造化して出力してください。"""
-
-        # 非同期でAPIを呼び出し
-        response = await asyncio.get_event_loop().run_in_executor(
-            None, model.generate_content, prompt
-        )
-
-        if response.text:
-            return response.text[:1024]
-        else:
-            return "要約の生成に失敗しました。"
-
-    except Exception as e:
-        print(f"Gemini API エラー: {e}")
-        return generate_simple_summary(messages)
+# The duplicated async_summarize_messages function that was here has been removed.
+# The current async_summarize_messages (defined earlier with caching) is the correct one.
 
 @bot.event
 async def on_ready():
@@ -434,7 +504,8 @@ async def advanced_summary(ctx, channel: discord.TextChannel = None):
 # Botを起動
 
 if __name__ == "__main__":
-    # 環境変数から読み込む場合は以下のようにする
-    # import os
-    # bot.run(os.getenv(‘DISCORD_BOT_TOKEN’))
-    bot.run('YOUR_DISCORD_BOT_TOKEN_HERE')
+    DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
+    if not DISCORD_BOT_TOKEN:
+        print("エラー: DISCORD_BOT_TOKEN が設定されていません。")
+    else:
+        bot.run(DISCORD_BOT_TOKEN)
