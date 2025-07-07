@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import asyncio
 from collections import defaultdict
 from google import genai  # 新しいGoogle Gen AI SDK
-from google.genai import types
+from google.genai import types  # types のインポート
 import os
 from dotenv import load_dotenv
 import psutil
@@ -24,14 +24,13 @@ if not DISCORD_BOT_TOKEN:
 if not GOOGLE_API_KEY:
     raise ValueError("GOOGLE_API_KEYが設定されていません。.envファイルを確認してください。")
 
-# Google Gen AI SDKのクライアント作成
+# Google Gen AI SDKのクライアント作成（最新SDK仕様）
 client = genai.Client(api_key=GOOGLE_API_KEY)
 
 # Botの設定
 intents = discord.Intents.default()
 intents.message_content = True  # メッセージ内容を読むために必要
 intents.guilds = True
-# intents.members = True  # これは今回のBotでは不要なのでコメントアウト
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
@@ -42,6 +41,9 @@ MONITORING_CHANNELS = [int(ch) for ch in MONITORING_CHANNELS if ch]  # 文字列
 SUMMARY_INTERVAL = int(os.getenv('SUMMARY_INTERVAL', 60))  # 要約を生成する間隔（分）
 MAX_MESSAGES_PER_SUMMARY = int(os.getenv('MAX_MESSAGES_PER_SUMMARY', 50))  # 1回の要約に含める最大メッセージ数
 MAX_BUFFER_SIZE = 100  # メッセージバッファの最大サイズ
+
+# 使用するモデル（環境変数で設定可能）
+MODEL_NAME = os.getenv('GEMINI_MODEL', 'gemini-2.5-pro')
 
 # メッセージを保存する辞書
 message_buffer = defaultdict(list)
@@ -79,7 +81,7 @@ def generate_simple_summary(messages):
     return "特定のトピックは見つかりませんでした。"
 
 def summarize_messages(messages):
-    """メッセージを要約する関数（Google Gen AI SDKを使用）"""
+    """メッセージを要約する関数（最新Google Gen AI SDKを使用）"""
     global daily_api_calls, last_reset_date
     
     # 日付が変わったらAPI使用量をリセット
@@ -118,11 +120,11 @@ def summarize_messages(messages):
 
 要約は簡潔で分かりやすく、箇条書きを使って構造化してください。"""
         
-        # APIを呼び出し
+        # APIを呼び出し（最新SDK仕様）
         response = client.models.generate_content(
-            model='gemini-1.5-flash',
+            model=MODEL_NAME,
             contents=prompt,
-            generation_config=types.GenerateContentConfig( # 'config' を 'generation_config' に変更
+            config=types.GenerateContentConfig(
                 temperature=0.3,
                 max_output_tokens=1000,
             ),
@@ -182,11 +184,11 @@ async def async_summarize_messages(messages):
 
 Markdown形式で構造化して出力してください。"""
         
-        # 非同期でAPIを呼び出し
+        # 非同期でAPIを呼び出し（最新SDK仕様）
         response = await client.aio.models.generate_content(
-            model='gemini-1.5-flash',
+            model=MODEL_NAME,
             contents=prompt,
-            generation_config=types.GenerateContentConfig( # 'config' を 'generation_config' に変更 (SDKのドキュメントに合わせる)
+            config=types.GenerateContentConfig(
                 temperature=0.3,
                 max_output_tokens=1500,
             ),
@@ -288,6 +290,7 @@ def needs_summary(messages):
 async def on_ready():
     bot.start_time = datetime.now()
     print(f'{bot.user} がログインしました！')
+    print(f'使用モデル: {MODEL_NAME}')
     summary_task.start()
     cleanup_task.start()
 
@@ -325,7 +328,7 @@ async def summary_task():
             if not channel:
                 continue
             
-            messages = message_buffer[channel_id][-MAX_MESSAGES_PER_SUMMARY:]
+            messages = message_buffer[channel.id][-MAX_MESSAGES_PER_SUMMARY:]
             
             # メッセージが少なすぎる場合はスキップ
             if not needs_summary(messages):
@@ -374,7 +377,7 @@ async def manual_summary(ctx, channel: discord.TextChannel = None):
         await ctx.send("要約するメッセージがありません。")
         return
     
-    messages = message_buffer[channel.id][-MAX_MESSAGES_PER_SUMMARY:]
+    messages = message_buffer[channel_id][-MAX_MESSAGES_PER_SUMMARY:]
     embed = create_summary_embed(messages, channel.name)
     await ctx.send(embed=embed)
 
@@ -470,7 +473,7 @@ async def bot_status(ctx):
     
     embed.add_field(
         name="AI要約",
-        value="Gemini Pro 使用中" if GOOGLE_API_KEY else "未設定",
+        value=f"{MODEL_NAME} 使用中" if GOOGLE_API_KEY else "未設定",
         inline=True
     )
     
@@ -564,6 +567,12 @@ async def api_usage(ctx):
         inline=True
     )
     
+    embed.add_field(
+        name="使用モデル",
+        value=MODEL_NAME,
+        inline=True
+    )
+    
     # 予測
     hours_passed = datetime.now().hour
     if hours_passed > 0:
@@ -623,12 +632,26 @@ async def system_info(ctx):
     )
     
     embed.add_field(
+        name="使用モデル",
+        value=MODEL_NAME,
+        inline=True
+    )
+    
+    embed.add_field(
         name="稼働時間",
         value=f"{(datetime.now() - bot.start_time).days}日" if hasattr(bot, 'start_time') else "不明",
         inline=True
     )
     
     await ctx.send(embed=embed)
+
+@bot.command(name='set_model')
+@commands.has_permissions(administrator=True)
+async def set_model(ctx, model_name: str):
+    """使用するモデルを変更"""
+    global MODEL_NAME
+    MODEL_NAME = model_name
+    await ctx.send(f"使用モデルを {model_name} に変更しました。")
 
 # Botを起動
 if __name__ == "__main__":
