@@ -1,5 +1,3 @@
-素晴らしい！BotがDiscordに正常に接続できています。次はDiscord側での設定を行いましょう。
-
 ## Discord側での設定手順
 
 ### 1. **BotをDiscordサーバーに招待**
