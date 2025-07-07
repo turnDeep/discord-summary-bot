@@ -31,22 +31,23 @@ client = genai.Client(api_key=GOOGLE_API_KEY)
 intents = discord.Intents.default()
 intents.message_content = True  # メッセージ内容を読むために必要
 intents.guilds = True
+intents.channels = True  # チャンネルの情報を取得するために必要
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# 設定項目（環境変数から読み込み可能）
-SUMMARY_CHANNEL_ID = int(os.getenv('SUMMARY_CHANNEL_ID', 0))  # 要約を投稿するチャンネルのID
-MONITORING_CHANNELS = os.getenv('MONITORING_CHANNELS', '').split(',') if os.getenv('MONITORING_CHANNELS') else []  # 監視するチャンネルのIDリスト
-MONITORING_CHANNELS = [int(ch) for ch in MONITORING_CHANNELS if ch]  # 文字列を整数に変換
+# 設定項目
 SUMMARY_INTERVAL = int(os.getenv('SUMMARY_INTERVAL', 60))  # 要約を生成する間隔（分）
-MAX_MESSAGES_PER_SUMMARY = int(os.getenv('MAX_MESSAGES_PER_SUMMARY', 50))  # 1回の要約に含める最大メッセージ数
-MAX_BUFFER_SIZE = 100  # メッセージバッファの最大サイズ
+MAX_MESSAGES_PER_SUMMARY = int(os.getenv('MAX_MESSAGES_PER_SUMMARY', 100))  # 1回の要約に含める最大メッセージ数
+MAX_BUFFER_SIZE = 200  # メッセージバッファの最大サイズ
+BOT_CHANNEL_NAME = os.getenv('BOT_CHANNEL_NAME', 'bot-summaries')  # Bot用チャンネルの名前
 
 # 使用するモデル（環境変数で設定可能）
 MODEL_NAME = os.getenv('GEMINI_MODEL', 'gemini-2.5-pro')
 
-# メッセージを保存する辞書
-message_buffer = defaultdict(list)
+# サーバーごとの設定を保存
+server_configs = {}
+# メッセージを保存する辞書（サーバーID -> チャンネルID -> メッセージリスト）
+message_buffers = defaultdict(lambda: defaultdict(list))
 
 # API使用量追跡用
 daily_api_calls = 0
@@ -59,29 +60,35 @@ class MessageData:
         self.timestamp = message.created_at
         self.jump_url = message.jump_url
         self.channel_name = message.channel.name
+        self.channel_id = message.channel.id
         self.attachments = len(message.attachments)
         self.embeds = len(message.embeds)
 
-def generate_simple_summary(messages):
+def generate_simple_summary(messages_by_channel):
     """Gemini APIが使えない場合の簡易要約"""
-    topics = []
-    content_words = defaultdict(int)
+    summaries = []
     
-    for msg in messages:
-        words = msg.content.lower().split()
-        for word in words:
-            if len(word) > 4:  # 4文字以上の単語をカウント
-                content_words[word] += 1
+    for channel_name, messages in messages_by_channel.items():
+        content_words = defaultdict(int)
+        
+        for msg in messages:
+            words = msg.content.lower().split()
+            for word in words:
+                if len(word) > 4:  # 4文字以上の単語をカウント
+                    content_words[word] += 1
+        
+        # 頻出単語TOP3
+        top_words = sorted(content_words.items(), key=lambda x: x[1], reverse=True)[:3]
+        if top_words:
+            keywords = ", ".join([word for word, _ in top_words])
+            summaries.append(f"**#{channel_name}**: {keywords}")
     
-    # 頻出単語TOP5
-    top_words = sorted(content_words.items(), key=lambda x: x[1], reverse=True)[:5]
-    if top_words:
-        return "頻出キーワード: " + ", ".join([word for word, _ in top_words])
-    
+    if summaries:
+        return "\n".join(summaries)
     return "特定のトピックは見つかりませんでした。"
 
-def summarize_messages(messages):
-    """メッセージを要約する関数（最新Google Gen AI SDKを使用）"""
+def summarize_all_channels(messages_by_channel):
+    """全チャンネルのメッセージを統合して要約する関数"""
     global daily_api_calls, last_reset_date
     
     # 日付が変わったらAPI使用量をリセット
@@ -89,44 +96,54 @@ def summarize_messages(messages):
         daily_api_calls = 0
         last_reset_date = datetime.now().date()
     
-    if not messages:
+    if not any(messages_by_channel.values()):
         return "要約するメッセージがありません。"
     
     try:
-        # メッセージを整形
-        message_texts = []
-        for msg in messages:
-            text = f"{msg.author}: {msg.content}"
-            if msg.attachments > 0:
-                text += f" [添付ファイル: {msg.attachments}件]"
-            if msg.embeds > 0:
-                text += f" [Embed: {msg.embeds}件]"
-            message_texts.append(text)
+        # 全チャンネルのメッセージを整形
+        all_conversations = []
         
-        # 会話履歴を結合
-        conversation = "\n".join(message_texts)
+        for channel_name, messages in messages_by_channel.items():
+            if not messages:
+                continue
+            
+            channel_text = f"\n=== #{channel_name} ===\n"
+            message_texts = []
+            
+            for msg in messages:
+                text = f"{msg.author}: {msg.content}"
+                if msg.attachments > 0:
+                    text += f" [添付ファイル: {msg.attachments}件]"
+                if msg.embeds > 0:
+                    text += f" [Embed: {msg.embeds}件]"
+                message_texts.append(text)
+            
+            channel_text += "\n".join(message_texts)
+            all_conversations.append(channel_text)
+        
+        # 全会話を結合
+        full_conversation = "\n\n".join(all_conversations)
         
         # プロンプトを構築
-        prompt = f"""以下のDiscordの会話を分析して、簡潔な要約を作成してください：
+        prompt = f"""以下は複数のDiscordチャンネルでの会話です。各チャンネルごとに要約を作成してください：
 
-会話内容：
-{conversation}
+{full_conversation}
 
-以下の点を含めて要約してください：
-1. 主要なトピックや話題
-2. 重要な決定事項や合意事項
-3. 質問と回答のペア
-4. 注目すべき情報や発言
+以下の形式で要約してください：
+1. 各チャンネルごとの主要なトピックや話題
+2. 重要な決定事項や合意事項（あれば）
+3. 注目すべき情報や発言
+4. 全体的な活動状況
 
-要約は簡潔で分かりやすく、箇条書きを使って構造化してください。"""
+チャンネルごとに見出しをつけて、簡潔にまとめてください。"""
         
-        # APIを呼び出し（最新SDK仕様）
+        # APIを呼び出し
         response = client.models.generate_content(
             model=MODEL_NAME,
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.3,
-                max_output_tokens=1000,
+                max_output_tokens=2000,
             ),
         )
         
@@ -134,165 +151,149 @@ def summarize_messages(messages):
         
         # レスポンスのテキストを取得
         if response.text:
-            return response.text[:1024]  # Embedフィールドの文字数制限
+            return response.text
         else:
             return "要約の生成に失敗しました。"
             
     except Exception as e:
         print(f"Gemini API エラー: {e}")
-        return generate_simple_summary(messages)
+        return generate_simple_summary(messages_by_channel)
 
-async def async_summarize_messages(messages):
-    """非同期版の要約関数（より高度な処理用）"""
-    global daily_api_calls, last_reset_date
+async def get_or_create_bot_channel(guild):
+    """Bot用チャンネルを取得または作成"""
+    # 既存のbot-summariesチャンネルを探す
+    for channel in guild.text_channels:
+        if channel.name == BOT_CHANNEL_NAME:
+            return channel
     
-    # 日付が変わったらAPI使用量をリセット
-    if datetime.now().date() != last_reset_date:
-        daily_api_calls = 0
-        last_reset_date = datetime.now().date()
-    
-    if not messages:
-        return "要約するメッセージがありません。"
-    
+    # なければ作成
     try:
-        # メッセージを整形
-        message_texts = []
-        for msg in messages:
-            text = f"{msg.author}: {msg.content}"
-            if msg.attachments > 0:
-                text += f" [添付ファイル: {msg.attachments}件]"
-            if msg.embeds > 0:
-                text += f" [Embed: {msg.embeds}件]"
-            message_texts.append(text)
-        
-        conversation = "\n".join(message_texts)
-        
-        # より詳細なプロンプト
-        prompt = f"""あなたはDiscordサーバーの会話を分析する専門家です。
-以下の会話を分析して、包括的な要約を作成してください。
-
-会話内容：
-{conversation}
-
-要約には以下を含めてください：
-1. **主要トピック**: 会話の中心となった話題
-2. **重要な情報**: 共有された重要な情報やリンク
-3. **決定事項**: 何か決定されたことがあれば記載
-4. **アクションアイテム**: 誰かが行うべきタスク
-5. **質問と回答**: 解決された質問と未解決の質問
-6. **全体的な雰囲気**: 会話のトーンや感情
-
-Markdown形式で構造化して出力してください。"""
-        
-        # 非同期でAPIを呼び出し（最新SDK仕様）
-        response = await client.aio.models.generate_content(
-            model=MODEL_NAME,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.3,
-                max_output_tokens=1500,
-            ),
+        channel = await guild.create_text_channel(
+            name=BOT_CHANNEL_NAME,
+            topic="このチャンネルはBotが定期的に要約を投稿します。"
         )
-        
-        daily_api_calls += 1
-        
-        if response.text:
-            return response.text[:1024]
-        else:
-            return "要約の生成に失敗しました。"
-            
-    except Exception as e:
-        print(f"Gemini API エラー: {e}")
-        return generate_simple_summary(messages)
+        return channel
+    except discord.Forbidden:
+        print(f"チャンネル作成権限がありません: {guild.name}")
+        return None
 
-def create_summary_embed(messages, channel_name):
-    """要約用のEmbedを作成"""
+def create_server_summary_embed(guild, messages_by_channel):
+    """サーバー全体の要約用Embedを作成"""
     embed = discord.Embed(
-        title=f"📋 {channel_name} の要約",
-        description=f"過去{SUMMARY_INTERVAL}分間のメッセージ要約",
+        title=f"📋 {guild.name} サーバー要約",
+        description=f"過去{SUMMARY_INTERVAL}分間の活動要約",
         color=discord.Color.blue(),
         timestamp=datetime.utcnow()
     )
     
-    # メッセージの統計
-    total_messages = len(messages)
-    unique_authors = len(set(msg.author for msg in messages))
+    # 全体の統計
+    total_messages = sum(len(messages) for messages in messages_by_channel.values())
+    active_channels = len([ch for ch, msgs in messages_by_channel.items() if msgs])
+    all_authors = set()
+    for messages in messages_by_channel.values():
+        for msg in messages:
+            all_authors.add(msg.author)
     
     embed.add_field(
         name="📊 統計",
-        value=f"メッセージ数: {total_messages}\n投稿者数: {unique_authors}",
+        value=f"総メッセージ数: {total_messages}\n"
+              f"アクティブチャンネル数: {active_channels}\n"
+              f"投稿者数: {len(all_authors)}",
         inline=False
     )
     
-    # 主要なトピック（Gemini APIを使用）
-    topics = summarize_messages(messages)
-    if topics:
+    # チャンネル別の活動状況
+    if active_channels > 0:
+        channel_stats = []
+        for channel_name, messages in sorted(messages_by_channel.items(), 
+                                            key=lambda x: len(x[1]), 
+                                            reverse=True)[:5]:  # TOP5チャンネル
+            if messages:
+                channel_stats.append(f"**#{channel_name}**: {len(messages)}件")
+        
+        if channel_stats:
+            embed.add_field(
+                name="📍 アクティブなチャンネル (TOP5)",
+                value="\n".join(channel_stats),
+                inline=False
+            )
+    
+    # 要約内容
+    summary = summarize_all_channels(messages_by_channel)
+    
+    # 要約が長すぎる場合は分割
+    if len(summary) > 1024:
+        # 最初の1000文字を表示
         embed.add_field(
-            name="🎯 主要なトピック",
-            value=topics[:1024],  # Embedフィールドの文字数制限
+            name="🎯 要約",
+            value=summary[:1000] + "...",
             inline=False
         )
-    
-    # アクティブな投稿者TOP3
-    author_counts = defaultdict(int)
-    for msg in messages:
-        author_counts[msg.author] += 1
-    
-    top_authors = sorted(author_counts.items(), key=lambda x: x[1], reverse=True)[:3]
-    if top_authors:
-        author_text = "\n".join([f"{i+1}. {author}: {count}件" 
-                                for i, (author, count) in enumerate(top_authors)])
+        # 残りは別フィールドに
+        remaining = summary[1000:]
+        while remaining and len(embed) < 5900:  # Embed全体の制限
+            chunk = remaining[:1024]
+            embed.add_field(
+                name="　",  # 空白の全角スペース
+                value=chunk,
+                inline=False
+            )
+            remaining = remaining[1024:]
+    else:
         embed.add_field(
-            name="👥 アクティブな投稿者",
-            value=author_text,
-            inline=True
-        )
-    
-    # 最新のメッセージ（最大5件）
-    recent_messages = messages[-5:] if len(messages) > 5 else messages
-    if recent_messages:
-        recent_text = []
-        for msg in recent_messages:
-            text = f"**{msg.author}**: {msg.content[:50]}..."
-            if msg.attachments > 0:
-                text += f" 📎({msg.attachments})"
-            text += f"\n[→ 元の投稿]({msg.jump_url})"
-            recent_text.append(text)
-        
-        embed.add_field(
-            name="💬 最新のメッセージ",
-            value="\n\n".join(recent_text[:5]),
+            name="🎯 要約",
+            value=summary,
             inline=False
         )
     
     return embed
 
-def needs_summary(messages):
-    """要約が必要かどうかを判定"""
-    if len(messages) < 5:
-        return False
+async def setup_guild(guild):
+    """サーバーの初期設定"""
+    guild_id = guild.id
     
-    # 同じユーザーの連続投稿が多い場合は要約不要
-    authors = [msg.author for msg in messages]
-    unique_authors = len(set(authors))
+    # Bot用チャンネルを取得または作成
+    bot_channel = await get_or_create_bot_channel(guild)
     
-    if unique_authors == 1 and len(messages) < 10:
-        return False
+    server_configs[guild_id] = {
+        'summary_channel': bot_channel,
+        'enabled': True
+    }
     
-    # 短いメッセージばかりの場合
-    total_length = sum(len(msg.content) for msg in messages)
-    if total_length < 200:  # 合計200文字未満
-        return False
-    
-    return True
+    if bot_channel:
+        print(f"サーバー '{guild.name}' の設定完了。要約チャンネル: #{bot_channel.name}")
+    else:
+        print(f"サーバー '{guild.name}' でチャンネル作成に失敗しました。")
 
 @bot.event
 async def on_ready():
     bot.start_time = datetime.now()
     print(f'{bot.user} がログインしました！')
     print(f'使用モデル: {MODEL_NAME}')
+    
+    # 既に参加している全サーバーの設定
+    for guild in bot.guilds:
+        await setup_guild(guild)
+    
+    # 定期タスクを開始
     summary_task.start()
     cleanup_task.start()
+
+@bot.event
+async def on_guild_join(guild):
+    """新しいサーバーに参加した時の処理"""
+    print(f"新しいサーバーに参加しました: {guild.name}")
+    await setup_guild(guild)
+
+@bot.event
+async def on_guild_remove(guild):
+    """サーバーから削除された時の処理"""
+    guild_id = guild.id
+    if guild_id in server_configs:
+        del server_configs[guild_id]
+    if guild_id in message_buffers:
+        del message_buffers[guild_id]
+    print(f"サーバーから削除されました: {guild.name}")
 
 @bot.event
 async def on_message(message):
@@ -300,169 +301,157 @@ async def on_message(message):
     if message.author.bot:
         return
     
-    # 監視対象チャンネルのメッセージを保存
-    if message.channel.id in MONITORING_CHANNELS:
-        message_data = MessageData(message)
-        message_buffer[message.channel.id].append(message_data)
-        
-        # より積極的なメモリ管理
-        if len(message_buffer[message.channel.id]) > MAX_BUFFER_SIZE:
-            # 古いメッセージを削除
-            message_buffer[message.channel.id] = message_buffer[message.channel.id][-MAX_BUFFER_SIZE:]
+    # DM は無視
+    if not message.guild:
+        return
+    
+    # Bot用チャンネルへの投稿は無視
+    if message.channel.name == BOT_CHANNEL_NAME:
+        return
+    
+    # メッセージを保存
+    guild_id = message.guild.id
+    channel_id = message.channel.id
+    
+    message_data = MessageData(message)
+    message_buffers[guild_id][channel_id].append(message_data)
+    
+    # バッファサイズ管理
+    if len(message_buffers[guild_id][channel_id]) > MAX_BUFFER_SIZE:
+        message_buffers[guild_id][channel_id] = message_buffers[guild_id][channel_id][-MAX_BUFFER_SIZE:]
     
     await bot.process_commands(message)
 
 @tasks.loop(minutes=SUMMARY_INTERVAL)
 async def summary_task():
-    """定期的に要約を生成して投稿"""
-    summary_channel = bot.get_channel(SUMMARY_CHANNEL_ID)
-    if not summary_channel:
-        print("要約チャンネルが見つかりません")
-        return
+    """定期的に全サーバーの要約を生成して投稿"""
     
-    api_calls = 0  # API呼び出し回数をカウント
-    
-    for channel_id in MONITORING_CHANNELS:
-        if channel_id in message_buffer and message_buffer[channel_id]:
-            channel = bot.get_channel(channel_id)
-            if not channel:
-                continue
-            
-            messages = message_buffer[channel.id][-MAX_MESSAGES_PER_SUMMARY:]
-            
-            # メッセージが少なすぎる場合はスキップ
-            if not needs_summary(messages):
-                print(f"チャンネル {channel.name}: 要約不要（メッセージ数: {len(messages)}）")
-                continue
-            
+    for guild_id, config in server_configs.items():
+        if not config['enabled'] or not config['summary_channel']:
+            continue
+        
+        guild = bot.get_guild(guild_id)
+        if not guild:
+            continue
+        
+        # このサーバーの全チャンネルのメッセージを収集
+        messages_by_channel = {}
+        total_messages = 0
+        
+        for channel_id, messages in message_buffers[guild_id].items():
+            if messages:
+                channel = guild.get_channel(channel_id)
+                if channel:
+                    messages_by_channel[channel.name] = messages[-MAX_MESSAGES_PER_SUMMARY:]
+                    total_messages += len(messages)
+        
+        # 1件以上のメッセージがあれば要約を生成
+        if total_messages > 0:
             try:
-                embed = create_summary_embed(messages, channel.name)
-                await summary_channel.send(embed=embed)
-                api_calls += 1
+                embed = create_server_summary_embed(guild, messages_by_channel)
+                summary_channel = config['summary_channel']
                 
-                # API呼び出し間隔を空ける（レート制限対策）
-                await asyncio.sleep(1)
+                if summary_channel:
+                    await summary_channel.send(embed=embed)
+                    print(f"[{datetime.now()}] {guild.name} の要約を投稿しました（{total_messages}件のメッセージ）")
+                
+                # 処理済みメッセージをクリア
+                message_buffers[guild_id].clear()
                 
             except Exception as e:
-                print(f"要約エラー: {e}")
-            
-            # 処理済みメッセージをクリア
-            message_buffer[channel_id].clear()
-    
-    print(f"[{datetime.now()}] 要約完了: {api_calls}回のAPI呼び出し")
+                print(f"要約エラー ({guild.name}): {e}")
+        else:
+            print(f"[{datetime.now()}] {guild.name}: 新しいメッセージがないため要約をスキップ")
 
 @tasks.loop(hours=6)  # 6時間ごとに実行
 async def cleanup_task():
     """定期的なメモリクリーンアップ"""
-    # 古いメッセージをクリア
-    for channel_id in list(message_buffer.keys()):
-        if channel_id not in MONITORING_CHANNELS:
-            del message_buffer[channel_id]
+    # 削除されたサーバーのデータをクリア
+    for guild_id in list(message_buffers.keys()):
+        if guild_id not in server_configs:
+            del message_buffers[guild_id]
     
     # ガベージコレクション実行
     gc.collect()
     print(f"[{datetime.now()}] メモリクリーンアップ完了")
 
 @bot.command(name='summary')
-async def manual_summary(ctx, channel: discord.TextChannel = None):
-    """手動で要約を生成するコマンド"""
-    if not channel:
-        channel = ctx.channel
-    
-    if channel.id not in MONITORING_CHANNELS:
-        await ctx.send("このチャンネルは監視対象ではありません。")
+async def manual_summary(ctx):
+    """手動で現在のサーバーの要約を生成するコマンド"""
+    if not ctx.guild:
+        await ctx.send("このコマンドはサーバー内でのみ使用できます。")
         return
     
-    if channel.id not in message_buffer or not message_buffer[channel.id]:
+    guild_id = ctx.guild.id
+    
+    # メッセージを収集
+    messages_by_channel = {}
+    total_messages = 0
+    
+    for channel_id, messages in message_buffers[guild_id].items():
+        if messages:
+            channel = ctx.guild.get_channel(channel_id)
+            if channel:
+                messages_by_channel[channel.name] = messages[-MAX_MESSAGES_PER_SUMMARY:]
+                total_messages += len(messages)
+    
+    if total_messages == 0:
         await ctx.send("要約するメッセージがありません。")
         return
     
-    messages = message_buffer[channel_id][-MAX_MESSAGES_PER_SUMMARY:]
-    embed = create_summary_embed(messages, channel.name)
+    embed = create_server_summary_embed(ctx.guild, messages_by_channel)
     await ctx.send(embed=embed)
-
-@bot.command(name='recent')
-async def recent_messages(ctx, limit: int = 10):
-    """最近のメッセージを表示"""
-    if ctx.channel.id not in MONITORING_CHANNELS:
-        await ctx.send("このチャンネルは監視対象ではありません。")
-        return
-    
-    messages = message_buffer[ctx.channel.id][-limit:]
-    if not messages:
-        await ctx.send("表示するメッセージがありません。")
-        return
-    
-    embed = discord.Embed(
-        title=f"最新の{len(messages)}件のメッセージ",
-        color=discord.Color.green()
-    )
-    
-    for msg in messages:
-        embed.add_field(
-            name=f"{msg.author} - {msg.timestamp.strftime('%H:%M')}",
-            value=f"{msg.content[:100]}{'...' if len(msg.content) > 100 else ''}\n[元の投稿]({msg.jump_url})",
-            inline=False
-        )
-    
-    await ctx.send(embed=embed)
-
-@bot.command(name='set_summary_channel')
-@commands.has_permissions(administrator=True)
-async def set_summary_channel(ctx, channel: discord.TextChannel):
-    """要約投稿チャンネルを設定"""
-    global SUMMARY_CHANNEL_ID
-    SUMMARY_CHANNEL_ID = channel.id
-    await ctx.send(f"要約チャンネルを {channel.mention} に設定しました。")
-
-@bot.command(name='add_monitor')
-@commands.has_permissions(administrator=True)
-async def add_monitor_channel(ctx, channel: discord.TextChannel):
-    """監視チャンネルを追加"""
-    if channel.id not in MONITORING_CHANNELS:
-        MONITORING_CHANNELS.append(channel.id)
-        await ctx.send(f"{channel.mention} を監視対象に追加しました。")
-    else:
-        await ctx.send(f"{channel.mention} は既に監視対象です。")
-
-@bot.command(name='remove_monitor')
-@commands.has_permissions(administrator=True)
-async def remove_monitor_channel(ctx, channel: discord.TextChannel):
-    """監視チャンネルを削除"""
-    if channel.id in MONITORING_CHANNELS:
-        MONITORING_CHANNELS.remove(channel.id)
-        if channel.id in message_buffer:
-            del message_buffer[channel.id]
-        await ctx.send(f"{channel.mention} を監視対象から削除しました。")
-    else:
-        await ctx.send(f"{channel.mention} は監視対象ではありません。")
 
 @bot.command(name='status')
 async def bot_status(ctx):
     """Botの状態を表示"""
+    if not ctx.guild:
+        await ctx.send("このコマンドはサーバー内でのみ使用できます。")
+        return
+    
+    guild_id = ctx.guild.id
+    config = server_configs.get(guild_id, {})
+    
     embed = discord.Embed(
         title="Bot Status",
         color=discord.Color.blue()
     )
     
-    summary_ch = bot.get_channel(SUMMARY_CHANNEL_ID)
+    # 要約チャンネル
+    summary_ch = config.get('summary_channel')
     embed.add_field(
         name="要約チャンネル",
         value=summary_ch.mention if summary_ch else "未設定",
         inline=False
     )
     
-    monitor_channels = []
-    for ch_id in MONITORING_CHANNELS:
-        ch = bot.get_channel(ch_id)
-        if ch:
-            count = len(message_buffer.get(ch_id, []))
-            monitor_channels.append(f"{ch.mention} ({count}件)")
+    # 監視状況
+    active_channels = []
+    total_buffered = 0
+    for channel_id, messages in message_buffers[guild_id].items():
+        if messages:
+            channel = ctx.guild.get_channel(channel_id)
+            if channel:
+                active_channels.append(f"#{channel.name}: {len(messages)}件")
+                total_buffered += len(messages)
     
     embed.add_field(
-        name="監視中のチャンネル",
-        value="\n".join(monitor_channels) if monitor_channels else "なし",
+        name="アクティブなチャンネル",
+        value="\n".join(active_channels[:10]) if active_channels else "なし",  # 最大10個表示
         inline=False
+    )
+    
+    if len(active_channels) > 10:
+        embed.add_field(
+            name="",
+            value=f"... 他 {len(active_channels) - 10} チャンネル",
+            inline=False
+        )
+    
+    embed.add_field(
+        name="バッファ内のメッセージ数",
+        value=f"合計 {total_buffered} 件",
+        inline=True
     )
     
     embed.add_field(
@@ -488,50 +477,34 @@ async def bot_status(ctx):
     
     await ctx.send(embed=embed)
 
-@bot.command(name='advanced_summary')
-async def advanced_summary(ctx, channel: discord.TextChannel = None):
-    """より詳細な要約を生成（非同期版）"""
-    if not channel:
-        channel = ctx.channel
-    
-    if channel.id not in MONITORING_CHANNELS:
-        await ctx.send("このチャンネルは監視対象ではありません。")
+@bot.command(name='toggle_summary')
+@commands.has_permissions(administrator=True)
+async def toggle_summary(ctx):
+    """このサーバーの要約機能のON/OFF切り替え"""
+    if not ctx.guild:
         return
     
-    if channel.id not in message_buffer or not message_buffer[channel.id]:
-        await ctx.send("要約するメッセージがありません。")
+    guild_id = ctx.guild.id
+    if guild_id in server_configs:
+        server_configs[guild_id]['enabled'] = not server_configs[guild_id]['enabled']
+        status = "有効" if server_configs[guild_id]['enabled'] else "無効"
+        await ctx.send(f"要約機能を{status}にしました。")
+    else:
+        await ctx.send("サーバー設定が見つかりません。")
+
+@bot.command(name='set_summary_channel')
+@commands.has_permissions(administrator=True)
+async def set_summary_channel(ctx, channel: discord.TextChannel):
+    """要約投稿チャンネルを設定"""
+    if not ctx.guild:
         return
     
-    # 処理中メッセージ
-    processing_msg = await ctx.send("🔄 詳細な要約を生成中...")
-    
-    try:
-        messages = message_buffer[channel.id][-MAX_MESSAGES_PER_SUMMARY:]
-        
-        # 非同期版の要約を使用
-        summary = await async_summarize_messages(messages)
-        
-        embed = discord.Embed(
-            title=f"📊 {channel.name} の詳細要約",
-            description=summary[:4096],  # Embed全体の文字数制限
-            color=discord.Color.gold(),
-            timestamp=datetime.utcnow()
-        )
-        
-        # メッセージ統計
-        embed.add_field(
-            name="📈 統計情報",
-            value=f"分析メッセージ数: {len(messages)}\n"
-                  f"期間: 過去{SUMMARY_INTERVAL}分間\n"
-                  f"投稿者数: {len(set(msg.author for msg in messages))}",
-            inline=False
-        )
-        
-        await processing_msg.delete()
-        await ctx.send(embed=embed)
-        
-    except Exception as e:
-        await processing_msg.edit(content=f"❌ エラーが発生しました: {str(e)}")
+    guild_id = ctx.guild.id
+    if guild_id in server_configs:
+        server_configs[guild_id]['summary_channel'] = channel
+        await ctx.send(f"要約チャンネルを {channel.mention} に設定しました。")
+    else:
+        await ctx.send("サーバー設定が見つかりません。")
 
 @bot.command(name='api_usage')
 @commands.has_permissions(administrator=True)
@@ -582,6 +555,15 @@ async def api_usage(ctx):
             value=f"約{int(predicted_daily)}回",
             inline=False
         )
+    
+    # 全サーバーの統計
+    total_servers = len(server_configs)
+    active_servers = len([c for c in server_configs.values() if c['enabled']])
+    embed.add_field(
+        name="サーバー統計",
+        value=f"総数: {total_servers}\nアクティブ: {active_servers}",
+        inline=False
+    )
     
     await ctx.send(embed=embed)
 
@@ -643,15 +625,14 @@ async def system_info(ctx):
         inline=True
     )
     
+    # サーバー数
+    embed.add_field(
+        name="参加サーバー数",
+        value=f"{len(bot.guilds)} サーバー",
+        inline=True
+    )
+    
     await ctx.send(embed=embed)
-
-@bot.command(name='set_model')
-@commands.has_permissions(administrator=True)
-async def set_model(ctx, model_name: str):
-    """使用するモデルを変更"""
-    global MODEL_NAME
-    MODEL_NAME = model_name
-    await ctx.send(f"使用モデルを {model_name} に変更しました。")
 
 # Botを起動
 if __name__ == "__main__":
