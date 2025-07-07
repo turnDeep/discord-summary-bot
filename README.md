@@ -1,175 +1,130 @@
-# Discord Summary Bot
+# Discord Summary Bot - 全チャンネル監視版
 
-This bot monitors specified Discord channels and periodically generates summaries of the conversations using the Gemini API. It can also provide manual summaries, display recent messages, and more.
+このボットは、招待されたDiscordサーバーの**全てのテキストチャンネル**を自動的に監視し、定期的に会話の要約を生成してbot専用チャンネルに投稿します。
 
-## Features
+## 主な特徴
 
-- Automatic summaries at configurable intervals.
-- Manual summary generation via command.
-- Customizable list of channels to monitor.
-- Identification of key topics, active users, and recent messages in summaries.
-- Powered by Google's latest Gemini models (default: Gemini 2.5 Pro)
-- Fallback to simple keyword-based summary if Gemini API fails or is not configured.
-- Commands to manage monitored channels and bot settings.
-- Advanced, more detailed summaries using an asynchronous Gemini API call.
-- Environment variable support for most configurations (e.g., API keys, channel IDs, summary interval).
-- Regular cleanup of old message data and garbage collection for better memory management.
-- Logic to determine if a summary is needed based on message count, unique authors, and content length.
-- API usage tracking and system resource monitoring commands for administrators.
-- Dynamic model switching via command (administrator only)
+- **全チャンネル自動監視**: 招待されたサーバーの全テキストチャンネルを自動的に監視
+- **自動チャンネル作成**: bot専用の要約チャンネル（`bot-summaries`）を自動作成
+- **1時間ごとの定期要約**: 1件以上の投稿があれば、全チャンネルの活動を統合して要約
+- **Gemini 2.5 Pro使用**: Google の最新AIモデルで高品質な要約を生成
+- **複数サーバー対応**: 複数のサーバーに招待されても、それぞれ独立して動作
+- **プライバシー配慮**: bot専用チャンネルへの投稿は要約対象外
 
-## Requirements
+## 動作の仕組み
 
-- Python 3.11+ (Recommended: Python 3.11.x as specified in `runtime.txt`)
+1. **ボットをサーバーに招待**すると、自動的に `bot-summaries` チャンネルを作成（または既存のものを使用）
+2. **全てのテキストチャンネル**でのメッセージを監視・記録
+3. **1時間ごと**に、全チャンネルの活動をまとめて要約を生成
+4. **1件以上**のメッセージがあれば、`bot-summaries` チャンネルに要約を投稿
+
+## 必要な要件
+
+- Python 3.11+
 - Discord Bot Token
-- Google API Key (for Gemini)
-- Latest Google GenAI SDK (`google-genai>=0.8.0`)
+- Google API Key (Gemini API用)
+- 必要な権限:
+  - メッセージを読む
+  - メッセージを送信する
+  - チャンネルを管理する（bot用チャンネル作成のため）
+  - 埋め込みリンク
 
-## Setup and Configuration
+## セットアップ
 
-### Installation
+### 1. 依存関係のインストール
 
-1. **Clone the repository (or download the files):**
-   ```bash
-   # If you are using git
-   # git clone <repository_url>
-   # cd <repository_name>
-   ```
-
-2. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-   This will install `discord.py`, `google-genai` (the latest Google Gen AI SDK), `python-dotenv`, and `psutil`.
-
-### Configuration
-
-Configure the bot using the `.env` file. Copy the template below and fill in your credentials:
-
-```env
-# Discord Bot Token
-# Discord Developer Portal (https://discord.com/developers/applications) から取得
-DISCORD_BOT_TOKEN=your_discord_bot_token
-
-# Google API Key for Gemini
-# Google AI Studio (https://makersuite.google.com/app/apikey) から取得
-GOOGLE_API_KEY=your_google_api_key
-
-# オプション設定（設定しない場合はデフォルト値が使用されます）
-
-# 使用するGeminiモデル デフォルト: gemini-2.5-pro
-# 他のオプション: gemini-2.0-flash-001, gemini-2.0-pro など
-GEMINI_MODEL=gemini-2.5-pro
-
-# 要約を投稿するチャンネルのID（必須）
-# Discordで右クリック→「IDをコピー」で取得可能
-SUMMARY_CHANNEL_ID=123456789012345678
-
-# 監視するチャンネルのIDリスト（カンマ区切り）
-MONITORING_CHANNELS=111111111111111111,222222222222222222
-
-# 要約を生成する間隔（分）デフォルト: 60
-SUMMARY_INTERVAL=60
-
-# 1回の要約に含める最大メッセージ数 デフォルト: 50
-MAX_MESSAGES_PER_SUMMARY=50
+```bash
+pip install -r requirements.txt
 ```
 
-**Getting the credentials:**
+### 2. 環境設定
 
-1. **Discord Bot Token:**
-   - Go to [Discord Developer Portal](https://discord.com/developers/applications)
-   - Create a New Application
-   - Go to the "Bot" tab
-   - Click "Add Bot"
-   - Copy the token
+`.env` ファイルを作成し、以下の内容を設定：
 
-2. **Google API Key:**
-   - Visit [Google AI Studio](https://aistudio.google.com/app/apikey)
-   - Create and obtain your API key
+```env
+# Discord Bot Token (必須)
+DISCORD_BOT_TOKEN=your_discord_bot_token
 
-3. **Channel IDs:**
-   - In Discord, enable Developer Mode (User Settings → App Settings → Advanced)
-   - Right-click on the desired channel and select "Copy ID"
+# Google API Key (必須)
+GOOGLE_API_KEY=your_google_api_key
 
-### Running the Bot
+# オプション設定
+GEMINI_MODEL=gemini-2.5-pro      # 使用するモデル
+BOT_CHANNEL_NAME=bot-summaries   # Bot用チャンネル名
+SUMMARY_INTERVAL=60               # 要約間隔（分）
+MAX_MESSAGES_PER_SUMMARY=100      # 1回の要約の最大メッセージ数
+```
 
-1. **Ensure all configurations are set in the `.env` file**
-2. **Run the bot:**
-   ```bash
-   python bot.py
-   ```
+### 3. ボットの起動
 
-## Commands
+```bash
+python bot.py
+```
 
-All commands are prefixed with `!`.
+## コマンド一覧
 
-- `!summary [channel]` - Generates a summary for the specified channel (e.g., `!summary #general`) or the current channel if none is provided.
-- `!advanced_summary [channel]` - Generates a more detailed and structured summary using the Gemini API's advanced capabilities.
-- `!recent [limit]` - Shows the most recent messages (default 10) in the current monitored channel.
-- `!status` - Displays the bot's current operational status, including the summary channel, monitored channels, summary interval, AI model status, and uptime.
-- `!set_summary_channel <#channel_mention>` - (Administrator only) Sets the channel where the bot will post automatic summaries.
-- `!add_monitor <#channel_mention>` - (Administrator only) Adds a channel to the monitoring list.
-- `!remove_monitor <#channel_mention>` - (Administrator only) Removes a channel from the monitoring list.
-- `!set_model <model_name>` - (Administrator only) Changes the Gemini model being used (e.g., `!set_model gemini-2.0-flash-001`).
-- `!api_usage` - (Administrator only) Displays the current usage of the Gemini API including daily usage and predictions.
-- `!system` - (Administrator only) Shows system resource usage including CPU, memory, and the current model being used.
+| コマンド | 説明 | 権限 |
+|---------|------|------|
+| `!summary` | 現在のサーバーの要約を手動で生成 | 全員 |
+| `!status` | ボットの現在の状態を表示（監視中のチャンネル、バッファ内のメッセージ数など） | 全員 |
+| `!toggle_summary` | このサーバーの自動要約のON/OFF切り替え | 管理者 |
+| `!set_summary_channel #channel` | 要約の投稿先チャンネルを変更 | 管理者 |
+| `!api_usage` | Gemini APIの使用状況を表示 | 管理者 |
+| `!system` | システムリソースの使用状況を表示 | 管理者 |
 
-## Available Models
+## 要約の内容
 
-The bot supports various Gemini models. The default is `gemini-2.5-pro`, but you can use:
+要約には以下の情報が含まれます：
 
-- `gemini-2.5-pro` (Default - Most advanced)
-- `gemini-2.0-flash-001` (Faster, lighter)
-- `gemini-2.0-pro` (Balanced performance)
-- Other models as they become available
+1. **統計情報**
+   - 総メッセージ数
+   - アクティブなチャンネル数
+   - 投稿者数
 
-You can change the model using the `!set_model` command or by setting the `GEMINI_MODEL` environment variable.
+2. **チャンネル別活動状況**
+   - 最もアクティブなチャンネルTOP5
 
-## How it Works
+3. **AI生成の要約**
+   - 各チャンネルの主要なトピック
+   - 重要な決定事項や合意事項
+   - 注目すべき情報
+   - 全体的な活動状況
 
-1. The bot listens to messages in channels listed in `MONITORING_CHANNELS`.
-2. Messages are stored in a temporary buffer with metadata (author, content, timestamp, etc.).
-3. Periodically (defined by `SUMMARY_INTERVAL`) or when `!summary`/`!advanced_summary` is called:
-   - The bot checks if a summary is needed based on message count and author diversity
-   - If needed, messages are sent to the Gemini API for analysis
-   - The API processes the conversation and returns a structured summary
-   - The summary is posted as an embed in the `SUMMARY_CHANNEL_ID`
-4. A background cleanup task runs every 6 hours to manage memory usage
-5. All API calls are tracked for usage monitoring
+## プライバシーとセキュリティ
 
-## Deployment (Example: Railway)
+- ボットは招待されたサーバー内のメッセージのみアクセス可能
+- bot専用チャンネル（`bot-summaries`）への投稿は監視対象外
+- メッセージは一時的にメモリに保存され、要約後は削除
+- 他のサーバーの情報にはアクセスできません
 
-1. Ensure your `Procfile` is present: `worker: python bot.py`
-2. Ensure `runtime.txt` specifies Python version: `python-3.11.x`
-3. Push your code to a GitHub repository
-4. In Railway:
-   - Create a new project and deploy from your GitHub repository
-   - Go to your service settings → Variables
-   - Add all environment variables from your `.env` file
-5. Railway will use the `Procfile` to start the bot
+## 複数サーバーでの使用
 
-## Latest SDK Features
+- 複数のサーバーにボットを招待可能
+- 各サーバーで独立して動作
+- サーバーごとに異なる要約チャンネルを設定可能
+- サーバーごとに要約機能のON/OFF切り替え可能
 
-This bot uses the latest Google GenAI SDK (`google-genai`) which provides:
+## トラブルシューティング
 
-- Improved performance and reliability
-- Better async support with `client.aio.models.generate_content()`
-- Enhanced configuration options with `types.GenerateContentConfig`
-- Support for the latest Gemini models including Gemini 2.5 Pro
-- More robust error handling
+### bot-summariesチャンネルが作成されない
+- ボットに「チャンネルを管理する」権限があることを確認
+- 手動でチャンネルを作成し、`!set_summary_channel` で設定も可能
 
-## Security Notes
+### 要約が投稿されない
+- `!status` コマンドで監視状況を確認
+- `!toggle_summary` で要約機能が有効になっているか確認
+- 1時間以内に1件以上のメッセージがあったか確認
 
-- Never commit your `.env` file to version control
-- Keep your API keys and bot tokens secure
-- The `.gitignore` file is configured to exclude sensitive files
-- Regularly rotate your API keys for security
+### 特定のチャンネルを監視対象外にしたい
+- 現在のバージョンでは、ボットがアクセスできる全チャンネルが監視対象
+- チャンネルの権限設定でボットのアクセスを制限することで対応可能
 
-## Contributing
+## 注意事項
 
-Feel free to open issues or submit pull requests to improve the bot. Make sure to test your changes thoroughly before submitting.
+- 大規模なサーバー（多数のアクティブチャンネル）では、要約が長くなる可能性があります
+- Gemini APIの日次制限（1,500回）に注意してください
+- メッセージ量が多い場合、メモリ使用量が増加する可能性があります
 
-## License
+## ライセンス
 
-This project is provided as-is for educational and personal use.
+このプロジェクトは教育・個人利用を目的として提供されています。
