@@ -173,7 +173,9 @@ def summarize_all_channels(messages_by_channel):
 - 重要な情報、決定事項、注目すべきトピックを優先
 - 簡潔で読みやすい要約（1500文字以内）
 - 余分な前置きや説明は一切不要
-- 箇条書きや見出しを活用して構造化"""
+- 箇条書きや見出しを活用して構造化
+- 登場する人物のDisplay Nameには敬称として「さん」を付けてください"""
+
         
         # APIを呼び出し
         response = client.models.generate_content(
