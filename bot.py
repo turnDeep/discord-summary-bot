@@ -71,7 +71,7 @@ class MessageData:
 
 def get_messages_in_timerange(guild_id, hours_back):
     """指定時間内のメッセージを取得"""
-    cutoff_time = datetime.utcnow() - timedelta(hours=hours_back)
+    cutoff_time = datetime.now(datetime.UTC) - timedelta(hours=hours_back)
     messages_by_channel = {}
     
     for channel_id, messages in message_buffers[guild_id].items():
@@ -88,7 +88,7 @@ def get_messages_in_timerange(guild_id, hours_back):
 
 def cleanup_old_messages():
     """24時間以上前のメッセージを削除"""
-    cutoff_time = datetime.utcnow() - timedelta(hours=24)
+    cutoff_time = datetime.now(datetime.UTC) - timedelta(hours=24)
     
     for guild_id in message_buffers:
         for channel_id in message_buffers[guild_id]:
@@ -216,7 +216,7 @@ def create_server_summary_embed(guild, messages_by_channel, time_description, co
     embed = discord.Embed(
         title=f"📋 {time_description}",
         color=color,
-        timestamp=datetime.utcnow()
+        timestamp=datetime.now(datetime.UTC)
     )
     
     # 全体の統計
