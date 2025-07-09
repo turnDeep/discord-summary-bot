@@ -52,10 +52,20 @@ SUMMARY_SCHEDULE = [
     {"hour": 9, "minute": 0, "hours_back": 6, "description": "午後の要約", "color": discord.Color.orange()},
 ]
 
+# 週次サマリーのスケジュール（月曜日の朝6時）
+WEEKLY_SUMMARY_SCHEDULE = {
+    "weekday": 0,  # 月曜日（UTCでは日曜日の21時）
+    "hour": 21,    # UTC 21:00 = JST 6:00
+    "minute": 0,
+    "hours_back": 168,  # 1週間 = 168時間
+    "description": "今週の要約",
+    "color": discord.Color.green()
+}
+
 # サーバーごとの設定を保存
 server_configs = {}
 # メッセージを保存する辞書（サーバーID -> チャンネルID -> メッセージリスト）
-# 24時間分のメッセージを保持するためにタイムスタンプ付きで管理
+# 1週間分のメッセージを保持するためにタイムスタンプ付きで管理
 message_buffers = defaultdict(lambda: defaultdict(lambda: deque()))
 
 # API使用量追跡用
@@ -91,8 +101,8 @@ def get_messages_in_timerange(guild_id, hours_back):
     return messages_by_channel
 
 def cleanup_old_messages():
-    """24時間以上前のメッセージを削除"""
-    cutoff_time = datetime.now(datetime.UTC) - timedelta(hours=24)
+    """1週間以上前のメッセージを削除"""
+    cutoff_time = datetime.now(datetime.UTC) - timedelta(hours=168)  # 1週間 = 168時間
     
     for guild_id in message_buffers:
         for channel_id in message_buffers[guild_id]:
@@ -124,7 +134,7 @@ def generate_simple_summary(messages_by_channel):
         return "\n".join(summaries)
     return "特定のトピックは見つかりませんでした。"
 
-def summarize_all_channels(messages_by_channel):
+def summarize_all_channels(messages_by_channel, is_weekly=False):
     """全チャンネルのメッセージを統合して要約する関数"""
     global daily_api_calls, last_reset_date
     
@@ -147,8 +157,10 @@ def summarize_all_channels(messages_by_channel):
             channel_text = f"\n=== #{channel_name} ===\n"
             message_texts = []
             
-            # 最新のMAX_MESSAGES_PER_SUMMARY件のみ処理
-            for msg in messages[-MAX_MESSAGES_PER_SUMMARY:]:
+            # 最新のMAX_MESSAGES_PER_SUMMARY件のみ処理（週次サマリーの場合は2倍）
+            max_messages = MAX_MESSAGES_PER_SUMMARY * 2 if is_weekly else MAX_MESSAGES_PER_SUMMARY
+            
+            for msg in messages[-max_messages:]:
                 text = f"{msg.author}: {msg.content}"
                 if msg.attachments > 0:
                     text += f" [添付ファイル: {msg.attachments}件]"
@@ -162,8 +174,23 @@ def summarize_all_channels(messages_by_channel):
         # 全会話を結合
         full_conversation = "\n\n".join(all_conversations)
         
-        # プロンプトを構築（全チャンネル俯瞰型、簡潔に）
-        prompt = f"""以下のDiscordチャンネルの会話を要約してください。
+        # プロンプトを構築（週次サマリー用の特別な指示を追加）
+        if is_weekly:
+            prompt = f"""以下は1週間分のDiscordチャンネルの会話です。1週間の活動を俯瞰的に要約してください。
+
+{full_conversation}
+
+重要な指示：
+- 1週間の活動を総括的に要約
+- 主要なトピック、決定事項、進捗状況を整理
+- チャンネルごとの活動傾向を分析
+- 重要な出来事や特筆すべき議論を強調
+- 週の前半と後半での変化があれば言及
+- 簡潔で読みやすい要約（1800文字以内）
+- 箇条書きや見出しを活用して構造化
+- 登場する人物のDisplay Nameには敬称として「さん」を付けてください"""
+        else:
+            prompt = f"""以下のDiscordチャンネルの会話を要約してください。
 
 {full_conversation}
 
@@ -183,7 +210,7 @@ def summarize_all_channels(messages_by_channel):
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.3,
-                max_output_tokens=1500,  # 出力トークン数を制限
+                max_output_tokens=2000 if is_weekly else 1500,  # 週次サマリーは少し長め
             ),
         )
         
@@ -217,7 +244,7 @@ async def get_or_create_bot_channel(guild):
         print(f"チャンネル作成権限がありません: {guild.name}")
         return None
 
-def create_server_summary_embed(guild, messages_by_channel, time_description, color=discord.Color.blue()):
+def create_server_summary_embed(guild, messages_by_channel, time_description, color=discord.Color.blue(), is_weekly=False):
     """サーバー全体の要約用Embedを作成"""
     embed = discord.Embed(
         title=f"📋 {time_description}",
@@ -241,12 +268,13 @@ def create_server_summary_embed(guild, messages_by_channel, time_description, co
         inline=False
     )
     
-    # チャンネル別の活動状況（TOP3のみ）
+    # チャンネル別の活動状況（週次サマリーの場合はTOP5）
     if active_channels > 0:
         channel_stats = []
+        top_count = 5 if is_weekly else 3
         for channel_name, messages in sorted(messages_by_channel.items(), 
                                             key=lambda x: len(x[1]), 
-                                            reverse=True)[:3]:  # TOP3に削減
+                                            reverse=True)[:top_count]:
             if messages:
                 channel_stats.append(f"**#{channel_name}**: {len(messages)}件")
         
@@ -257,10 +285,10 @@ def create_server_summary_embed(guild, messages_by_channel, time_description, co
                 inline=False
             )
     
-    # 要約内容（分割なし、2000文字まで対応）
-    summary = summarize_all_channels(messages_by_channel)
+    # 要約内容
+    summary = summarize_all_channels(messages_by_channel, is_weekly=is_weekly)
     
-    # 要約をそのまま追加（分割処理を削除）
+    # 要約をそのまま追加
     embed.description = summary
     
     return embed
@@ -282,7 +310,7 @@ async def setup_guild(guild):
     else:
         print(f"サーバー '{guild.name}' でチャンネル作成に失敗しました。")
 
-async def post_scheduled_summary(schedule_info):
+async def post_scheduled_summary(schedule_info, is_weekly=False):
     """スケジュールに従って要約を投稿"""
     for guild_id, config in server_configs.items():
         if not config['enabled'] or not config['summary_channel']:
@@ -301,7 +329,8 @@ async def post_scheduled_summary(schedule_info):
                     guild, 
                     messages_by_channel, 
                     schedule_info['description'],
-                    schedule_info['color']
+                    schedule_info['color'],
+                    is_weekly=is_weekly
                 )
                 summary_channel = config['summary_channel']
                 
@@ -320,7 +349,8 @@ async def on_ready():
     bot.start_time = datetime.now()
     print(f'{bot.user} がログインしました！')
     print(f'使用モデル: {MODEL_NAME}')
-    print(f'要約スケジュール: 6時(前日の要約)、12時(午前の要約)、18時(午後の要約)')
+    print(f'要約スケジュール: 6時(前日の要約)、12時(午前の要約)、18時(午後の要約)、月曜6時(週次要約)')
+    print(f'メッセージ保持期間: 1週間（168時間）')
     
     # 既に参加している全サーバーの設定
     for guild in bot.guilds:
@@ -375,6 +405,7 @@ async def scheduled_summary_task():
     now = datetime.now()
     current_time = time(now.hour, now.minute)
     
+    # 通常の要約スケジュール
     for schedule in SUMMARY_SCHEDULE:
         scheduled_time = time(schedule['hour'], schedule['minute'])
         
@@ -382,9 +413,15 @@ async def scheduled_summary_task():
         if (current_time.hour == scheduled_time.hour and 
             current_time.minute == scheduled_time.minute):
             await post_scheduled_summary(schedule)
-            
-            # 古いメッセージをクリーンアップ
-            cleanup_old_messages()
+    
+    # 週次サマリーのチェック（UTCで日曜日の21時 = JSTで月曜日の6時）
+    if (now.weekday() == 6 and  # 日曜日（UTC）
+        current_time.hour == WEEKLY_SUMMARY_SCHEDULE['hour'] and
+        current_time.minute == WEEKLY_SUMMARY_SCHEDULE['minute']):
+        await post_scheduled_summary(WEEKLY_SUMMARY_SCHEDULE, is_weekly=True)
+        
+        # 古いメッセージをクリーンアップ
+        cleanup_old_messages()
 
 @tasks.loop(hours=6)  # 6時間ごとに実行
 async def cleanup_task():
@@ -394,7 +431,7 @@ async def cleanup_task():
         if guild_id not in server_configs:
             del message_buffers[guild_id]
     
-    # 24時間以上前のメッセージを削除
+    # 1週間以上前のメッセージを削除
     cleanup_old_messages()
     
     # ガベージコレクション実行
@@ -409,16 +446,17 @@ async def manual_summary(ctx, hours: int = 24):
     !summary - 過去24時間の要約
     !summary 6 - 過去6時間の要約
     !summary 48 - 過去48時間の要約
+    !summary 168 - 過去1週間の要約
     """
     if not ctx.guild:
         await ctx.send("このコマンドはサーバー内でのみ使用できます。")
         return
     
-    # 時間の範囲を制限（最大72時間）
+    # 時間の範囲を制限（最大168時間 = 1週間）
     if hours < 1:
         hours = 1
-    elif hours > 72:
-        hours = 72
+    elif hours > 168:
+        hours = 168
     
     guild_id = ctx.guild.id
     
@@ -434,10 +472,13 @@ async def manual_summary(ctx, hours: int = 24):
         color = discord.Color.green()
     elif hours <= 24:
         color = discord.Color.blue()
-    else:
+    elif hours <= 48:
         color = discord.Color.purple()
+    else:
+        color = discord.Color.gold()  # 週次要約
     
-    embed = create_server_summary_embed(ctx.guild, messages_by_channel, f"過去{hours}時間の要約", color)
+    is_weekly = hours >= 168
+    embed = create_server_summary_embed(ctx.guild, messages_by_channel, f"過去{hours}時間の要約", color, is_weekly=is_weekly)
     await ctx.send(embed=embed)
 
 @bot.command(name='status')
@@ -488,13 +529,15 @@ async def bot_status(ctx):
     
     embed.add_field(
         name="バッファ内のメッセージ数",
-        value=f"合計 {total_buffered} 件（過去24時間）",
+        value=f"合計 {total_buffered} 件（過去1週間）",
         inline=True
     )
     
     # 次回の要約時刻
     now = datetime.now()
     next_summaries = []
+    
+    # 通常の要約
     for schedule in SUMMARY_SCHEDULE:
         scheduled_time = datetime.combine(now.date(), time(schedule['hour'], schedule['minute']))
         if scheduled_time < now:
@@ -503,6 +546,25 @@ async def bot_status(ctx):
         hours_until = int(time_until.total_seconds() // 3600)
         minutes_until = int((time_until.total_seconds() % 3600) // 60)
         next_summaries.append(f"{schedule['hour']}時 ({hours_until}時間{minutes_until}分後) - {schedule['description']}")
+    
+    # 週次要約（月曜日の朝6時 = UTC日曜日21時）
+    days_until_monday = (6 - now.weekday()) % 7  # 次の日曜日（UTC）までの日数
+    if days_until_monday == 0 and now.hour >= WEEKLY_SUMMARY_SCHEDULE['hour']:
+        days_until_monday = 7
+    
+    next_weekly = datetime.combine(
+        now.date() + timedelta(days=days_until_monday),
+        time(WEEKLY_SUMMARY_SCHEDULE['hour'], WEEKLY_SUMMARY_SCHEDULE['minute'])
+    )
+    time_until_weekly = next_weekly - now
+    days = time_until_weekly.days
+    hours = time_until_weekly.seconds // 3600
+    minutes = (time_until_weekly.seconds % 3600) // 60
+    
+    if days > 0:
+        next_summaries.append(f"月曜6時 ({days}日{hours}時間後) - 週次要約")
+    else:
+        next_summaries.append(f"月曜6時 ({hours}時間{minutes}分後) - 週次要約")
     
     embed.add_field(
         name="次回の要約",
@@ -524,6 +586,12 @@ async def bot_status(ctx):
             value=f"{uptime.days}日 {uptime.seconds // 3600}時間",
             inline=True
         )
+    
+    embed.add_field(
+        name="メッセージ保持期間",
+        value="1週間（168時間）",
+        inline=True
+    )
     
     await ctx.send(embed=embed)
 
@@ -596,13 +664,14 @@ async def api_usage(ctx):
         inline=True
     )
     
-    # 予測（1日3回の要約 × サーバー数）
+    # 予測（1日3回 + 週1回の要約 × サーバー数）
     total_servers = len(server_configs)
     active_servers = len([c for c in server_configs.values() if c['enabled']])
-    predicted_daily = active_servers * 3
+    # 週次要約は週1回なので、1日あたり約0.14回
+    predicted_daily = active_servers * 3 + (active_servers * 0.14)
     embed.add_field(
         name="本日の予測使用回数",
-        value=f"約{predicted_daily}回（{active_servers}サーバー × 3回）",
+        value=f"約{predicted_daily:.0f}回（定期要約）",
         inline=False
     )
     
@@ -677,6 +746,12 @@ async def system_info(ctx):
     embed.add_field(
         name="参加サーバー数",
         value=f"{len(bot.guilds)} サーバー",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="メッセージ保持期間",
+        value="1週間（168時間）",
         inline=True
     )
     
