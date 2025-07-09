@@ -31,7 +31,6 @@ client = genai.Client(api_key=GOOGLE_API_KEY)
 intents = discord.Intents.default()
 intents.message_content = True  # メッセージ内容を読むために必要
 intents.guilds = True
-intents.channels = True  # チャンネルの情報を取得するために必要
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
