@@ -42,10 +42,14 @@ BOT_CHANNEL_NAME = os.getenv('BOT_CHANNEL_NAME', 'bot-summaries')  # Bot用チ�
 MODEL_NAME = os.getenv('GEMINI_MODEL', 'gemini-2.5-pro')
 
 # 要約スケジュール（時刻と要約期間）
+# JST（日本時間）の6時、12時、18時に投稿されるようにUTCで設定
 SUMMARY_SCHEDULE = [
-    {"hour": 6, "minute": 0, "hours_back": 24, "description": "前日の要約", "color": discord.Color.purple()},
-    {"hour": 12, "minute": 0, "hours_back": 6, "description": "午前の要約", "color": discord.Color.blue()},
-    {"hour": 18, "minute": 0, "hours_back": 6, "description": "午後の要約", "color": discord.Color.orange()},
+    # JST 6:00 (UTC 21:00 of previous day)
+    {"hour": 21, "minute": 0, "hours_back": 24, "description": "前日の要約", "color": discord.Color.purple()},
+    # JST 12:00 (UTC 3:00)
+    {"hour": 3, "minute": 0, "hours_back": 6, "description": "午前の要約", "color": discord.Color.blue()},
+    # JST 18:00 (UTC 9:00)
+    {"hour": 9, "minute": 0, "hours_back": 6, "description": "午後の要約", "color": discord.Color.orange()},
 ]
 
 # サーバーごとの設定を保存
