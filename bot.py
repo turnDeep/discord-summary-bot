@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands, tasks
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, timezone
 import asyncio
 from collections import defaultdict, deque
 from google import genai  # 新しいGoogle Gen AI SDK
@@ -85,13 +85,13 @@ class MessageData:
 
 def get_messages_in_timerange(guild_id, hours_back):
     """指定時間内のメッセージを取得"""
-    cutoff_time = datetime.now(datetime.UTC) - timedelta(hours=hours_back)
+    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours_back)
     messages_by_channel = {}
     
     for channel_id, messages in message_buffers[guild_id].items():
         filtered_messages = [
             msg for msg in messages 
-            if msg.timestamp.replace(tzinfo=None) > cutoff_time
+            if msg.timestamp.replace(tzinfo=None) > cutoff_time.replace(tzinfo=None)
         ]
         if filtered_messages:
             # チャンネル名でグループ化
@@ -102,13 +102,13 @@ def get_messages_in_timerange(guild_id, hours_back):
 
 def cleanup_old_messages():
     """1週間以上前のメッセージを削除"""
-    cutoff_time = datetime.now(datetime.UTC) - timedelta(hours=168)  # 1週間 = 168時間
+    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=168)  # 1週間 = 168時間
     
     for guild_id in message_buffers:
         for channel_id in message_buffers[guild_id]:
             # dequeから古いメッセージを削除
             while (message_buffers[guild_id][channel_id] and 
-                   message_buffers[guild_id][channel_id][0].timestamp.replace(tzinfo=None) < cutoff_time):
+                   message_buffers[guild_id][channel_id][0].timestamp.replace(tzinfo=None) < cutoff_time.replace(tzinfo=None)):
                 message_buffers[guild_id][channel_id].popleft()
 
 def generate_simple_summary(messages_by_channel):
@@ -249,7 +249,7 @@ def create_server_summary_embed(guild, messages_by_channel, time_description, co
     embed = discord.Embed(
         title=f"📋 {time_description}",
         color=color,
-        timestamp=datetime.now(datetime.UTC)
+        timestamp=datetime.now(timezone.utc)
     )
     
     # 全体の統計
