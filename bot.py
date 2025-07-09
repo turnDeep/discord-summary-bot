@@ -43,9 +43,9 @@ MODEL_NAME = os.getenv('GEMINI_MODEL', 'gemini-2.5-pro')
 
 # 要約スケジュール（時刻と要約期間）
 SUMMARY_SCHEDULE = [
-    {"hour": 6, "minute": 0, "hours_back": 24, "description": "過去24時間"},
-    {"hour": 12, "minute": 0, "hours_back": 6, "description": "6時から12時"},
-    {"hour": 18, "minute": 0, "hours_back": 6, "description": "12時から18時"},
+    {"hour": 6, "minute": 0, "hours_back": 24, "description": "前日の要約", "color": discord.Color.purple()},
+    {"hour": 12, "minute": 0, "hours_back": 6, "description": "午前の要約", "color": discord.Color.blue()},
+    {"hour": 18, "minute": 0, "hours_back": 6, "description": "午後の要約", "color": discord.Color.orange()},
 ]
 
 # サーバーごとの設定を保存
@@ -60,7 +60,7 @@ last_reset_date = datetime.now().date()
 
 class MessageData:
     def __init__(self, message):
-        self.author = message.author.name
+        self.author = message.author.display_name  # Display Nameを使用
         self.content = message.content
         self.timestamp = message.created_at
         self.jump_url = message.jump_url
@@ -158,18 +158,18 @@ def summarize_all_channels(messages_by_channel):
         # 全会話を結合
         full_conversation = "\n\n".join(all_conversations)
         
-        # プロンプトを構築
-        prompt = f"""以下は複数のDiscordチャンネルでの会話です。各チャンネルごとに要約を作成してください：
+        # プロンプトを構築（全チャンネル俯瞰型、簡潔に）
+        prompt = f"""以下のDiscordチャンネルの会話を要約してください。
 
 {full_conversation}
 
-以下の形式で要約してください：
-1. 各チャンネルごとの主要なトピックや話題
-2. 重要な決定事項や合意事項（あれば）
-3. 注目すべき情報や発言
-4. 全体的な活動状況
-
-チャンネルごとに見出しをつけて、簡潔にまとめてください。"""
+重要な指示：
+- 全チャンネルを俯瞰して統合的に要約する
+- 「#チャンネル名で誰が何を話したか」を明確に記載
+- 重要な情報、決定事項、注目すべきトピックを優先
+- 簡潔で読みやすい要約（1500文字以内）
+- 余分な前置きや説明は一切不要
+- 箇条書きや見出しを活用して構造化"""
         
         # APIを呼び出し
         response = client.models.generate_content(
@@ -177,7 +177,7 @@ def summarize_all_channels(messages_by_channel):
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.3,
-                max_output_tokens=2000,
+                max_output_tokens=1500,  # 出力トークン数を制限
             ),
         )
         
@@ -211,12 +211,11 @@ async def get_or_create_bot_channel(guild):
         print(f"チャンネル作成権限がありません: {guild.name}")
         return None
 
-def create_server_summary_embed(guild, messages_by_channel, time_description):
+def create_server_summary_embed(guild, messages_by_channel, time_description, color=discord.Color.blue()):
     """サーバー全体の要約用Embedを作成"""
     embed = discord.Embed(
-        title=f"📋 {guild.name} サーバー要約",
-        description=f"{time_description}の活動要約",
-        color=discord.Color.blue(),
+        title=f"📋 {time_description}",
+        color=color,
         timestamp=datetime.utcnow()
     )
     
@@ -228,57 +227,35 @@ def create_server_summary_embed(guild, messages_by_channel, time_description):
         for msg in messages:
             all_authors.add(msg.author)
     
+    # 統計情報を簡潔に
+    stats_text = f"💬 {total_messages}件 | 📍 {active_channels}ch | 👥 {len(all_authors)}人"
     embed.add_field(
         name="📊 統計",
-        value=f"総メッセージ数: {total_messages}\n"
-              f"アクティブチャンネル数: {active_channels}\n"
-              f"投稿者数: {len(all_authors)}",
+        value=stats_text,
         inline=False
     )
     
-    # チャンネル別の活動状況
+    # チャンネル別の活動状況（TOP3のみ）
     if active_channels > 0:
         channel_stats = []
         for channel_name, messages in sorted(messages_by_channel.items(), 
                                             key=lambda x: len(x[1]), 
-                                            reverse=True)[:5]:  # TOP5チャンネル
+                                            reverse=True)[:3]:  # TOP3に削減
             if messages:
                 channel_stats.append(f"**#{channel_name}**: {len(messages)}件")
         
         if channel_stats:
             embed.add_field(
-                name="📍 アクティブなチャンネル (TOP5)",
-                value="\n".join(channel_stats),
+                name="🔥 活発なチャンネル",
+                value=" / ".join(channel_stats),
                 inline=False
             )
     
-    # 要約内容
+    # 要約内容（分割なし、2000文字まで対応）
     summary = summarize_all_channels(messages_by_channel)
     
-    # 要約が長すぎる場合は分割
-    if len(summary) > 1024:
-        # 最初の1000文字を表示
-        embed.add_field(
-            name="🎯 要約",
-            value=summary[:1000] + "...",
-            inline=False
-        )
-        # 残りは別フィールドに
-        remaining = summary[1000:]
-        while remaining and len(embed) < 5900:  # Embed全体の制限
-            chunk = remaining[:1024]
-            embed.add_field(
-                name="　",  # 空白の全角スペース
-                value=chunk,
-                inline=False
-            )
-            remaining = remaining[1024:]
-    else:
-        embed.add_field(
-            name="🎯 要約",
-            value=summary,
-            inline=False
-        )
+    # 要約をそのまま追加（分割処理を削除）
+    embed.description = summary
     
     return embed
 
@@ -317,14 +294,15 @@ async def post_scheduled_summary(schedule_info):
                 embed = create_server_summary_embed(
                     guild, 
                     messages_by_channel, 
-                    schedule_info['description']
+                    schedule_info['description'],
+                    schedule_info['color']
                 )
                 summary_channel = config['summary_channel']
                 
                 if summary_channel:
                     await summary_channel.send(embed=embed)
                     total_messages = sum(len(msgs) for msgs in messages_by_channel.values())
-                    print(f"[{datetime.now()}] {guild.name} の{schedule_info['description']}要約を投稿しました（{total_messages}件のメッセージ）")
+                    print(f"[{datetime.now()}] {guild.name} の{schedule_info['description']}を投稿しました（{total_messages}件のメッセージ）")
                 
             except Exception as e:
                 print(f"要約エラー ({guild.name}): {e}")
@@ -336,7 +314,7 @@ async def on_ready():
     bot.start_time = datetime.now()
     print(f'{bot.user} がログインしました！')
     print(f'使用モデル: {MODEL_NAME}')
-    print(f'要約スケジュール: 6時(24時間分)、12時(6時間分)、18時(6時間分)')
+    print(f'要約スケジュール: 6時(前日の要約)、12時(午前の要約)、18時(午後の要約)')
     
     # 既に参加している全サーバーの設定
     for guild in bot.guilds:
@@ -445,7 +423,15 @@ async def manual_summary(ctx, hours: int = 24):
         await ctx.send(f"過去{hours}時間の要約するメッセージがありません。")
         return
     
-    embed = create_server_summary_embed(ctx.guild, messages_by_channel, f"過去{hours}時間")
+    # 手動要約用の色を設定
+    if hours <= 6:
+        color = discord.Color.green()
+    elif hours <= 24:
+        color = discord.Color.blue()
+    else:
+        color = discord.Color.purple()
+    
+    embed = create_server_summary_embed(ctx.guild, messages_by_channel, f"過去{hours}時間の要約", color)
     await ctx.send(embed=embed)
 
 @bot.command(name='status')
