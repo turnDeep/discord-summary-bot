@@ -60,7 +60,7 @@ GOOGLE_API_KEY=your_google_api_key
 # オプション設定
 GEMINI_MODEL=gemini-2.5-pro      # 使用するモデル（デフォルト: gemini-2.5-pro）
 BOT_CHANNEL_NAME=bot-summaries   # Bot用チャンネル名
-MAX_MESSAGES_PER_SUMMARY=100      # 1回の要約の最大メッセージ数
+MAX_MESSAGES_PER_SUMMARY=500      # 1回の要約の最大メッセージ数
 ```
 
 ### 3. ボットの起動
